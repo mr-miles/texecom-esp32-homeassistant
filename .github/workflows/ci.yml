@@ -12,10 +12,10 @@ jobs:
     name: Host C++ unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Cache Catch2 fetch
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: build/tests/_deps
           key: catch2-v3.5.2-${{ runner.os }}
@@ -33,9 +33,9 @@ jobs:
     name: ESPHome compile
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -55,7 +55,7 @@ jobs:
           EOF
 
       - name: Cache PlatformIO
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.platformio
