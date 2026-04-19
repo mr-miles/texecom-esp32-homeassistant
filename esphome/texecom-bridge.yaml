@@ -13,16 +13,16 @@
 esphome:
   name: texecom-bridge
   friendly_name: Texecom Bridge
-  # AsyncTCP fork maintained by ESPHome.
-  #
-  # Upstream "AsyncTCP @ 1.1.1" uses the removed xQueueHandle typedef.
-  # AsyncTCP-esphome 2.1.x added IPv6 support that requires the
-  # Arduino-ESP32 v3.x core (ships IPv6Address.h); ESPHome currently
-  # defaults to Arduino-ESP32 v2.x where that header doesn't exist, so
-  # 2.1.x fails to compile. Pin to the 2.0.x line which doesn't depend
-  # on IPv6Address.h and works on the v2.x core.
+  # AsyncTCP fork maintained by Mathieu Carbou — actively kept in sync
+  # with current Arduino-ESP32 cores. We tried both:
+  #   - me-no-dev/AsyncTCP@1.1.1     uses removed xQueueHandle typedef
+  #   - esphome/AsyncTCP-esphome 2.0 same xQueueHandle problem
+  #   - esphome/AsyncTCP-esphome 2.1 requires IPv6Address.h (Arduino-ESP32 v3)
+  # ESPHome's default Arduino-ESP32 sits between those, so neither
+  # esphome fork compiles. mathieucarbou's 3.x line works on both v2
+  # and v3 cores.
   libraries:
-    - "esphome/AsyncTCP-esphome@~2.0.1"
+    - "mathieucarbou/AsyncTCP @ ^3.2.10"
 
 esp32:
   board: m5stack-atoms3
