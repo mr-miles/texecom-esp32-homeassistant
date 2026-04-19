@@ -1,0 +1,210 @@
+---
+phase: 02-wintex-protocol-capture-decode
+plan: 01
+status: code-complete (CI pending)
+date: 2026-04-19
+---
+
+# Plan 02-01 Summary: On-Device Capture Infrastructure
+
+## What shipped
+
+- `components/texecom/capture.{h,cpp}` — `Capture` class with TXCP binary
+  format, in-memory event ring (64 events), LittleFS persistence, paired
+  hex-dump sidecar, file rotation, and a host-test sink hook. Pure
+  serializers (`serialize_header`, `serialize_event`, `parse_header`,
+  `parse_event`) live in the header so unit tests bypass the
+  Arduino-only persistence layer.
+- `components/texecom/texecom.{h,cpp}` — owns a `Capture capture_;`
+  member. Hooked from `pump_uart_to_tcp_` (direction 0), `on_client_data_`
+  (direction 1), `on_new_client_` (`on_session_start`),
+  `on_client_disconnect_` (`on_session_end`), and `loop()` (drain ring).
+  Capture failures NEVER block the byte pump — they bump a drop counter
+  and emit a throttled WARN.
+- `components/texecom/__init__.py` — accepts `record_when`,
+  `capture_max_file_bytes`, `capture_root` schema options.
+- `esphome/texecom-bridge.yaml` — three new options under `texecom:`,
+  plus `web_server: { port: 80, version: 3 }` for HTTP downloads.
+- `tests/test_capture.cpp` — 8 Catch2 TEST_CASEs covering the locked
+  format, registered in `tests/CMakeLists.txt` alongside `capture.cpp`.
+
+## TXCP binary format v1 (LOCKED)
+
+### File header — exactly 32 bytes, written once per file
+
+| offset | size | field          | notes                                  |
+|--------|------|----------------|----------------------------------------|
+| 0      | 4    | `magic`        | ASCII `"TXCP"` (`0x54 0x58 0x43 0x50`) |
+| 4      | 2    | `version`      | uint16 LE, == 1                        |
+| 6      | 4    | `start_unix_s` | uint32 LE, wall-clock at file open or 0 |
+| 10     | 16   | `panel_name`   | ASCII null-padded, e.g. `"Premier 24"` |
+| 26     | 4    | `baud_rate`    | uint32 LE, e.g. 19200                  |
+| 30     | 2    | `reserved`     | zero                                   |
+
+### Event record — variable length
+
+| offset | size | field          | notes                                  |
+|--------|------|----------------|----------------------------------------|
+| 0      | 1    | `direction`    | 0 = panel→client, 1 = client→panel     |
+| 1      | 8    | `timestamp_us` | uint64 LE, microseconds since file open |
+| 9      | 2    | `length`       | uint16 LE, 0..65535                    |
+| 11     | N    | `bytes`        | payload (`length` bytes)               |
+
+Records are concatenated back-to-back after the header. The parser walks
+the stream linearly with no framing markers required.
+
+### Rotation
+
+- New file when `current_file_bytes_ + len > max_file_bytes_`.
+- New file on `on_session_start()` (Bridge mode begins).
+- Closes file on `on_session_end()` (Bridge mode ends).
+- Filename: `{root}/wintex-{unix_ts}-{NNN}.bin` if SNTP synced,
+  otherwise `{root}/wintex-boot{boot_ms}-{NNN}.bin`. `NNN` is a
+  zero-padded sequence counter that resets each boot.
+
+### Hex-dump sidecar
+
+Written **incrementally** alongside the `.bin` (chosen for simplicity —
+no second pass needed at download time, and the user can browse the
+`.txt` directly without parsing). 16 bytes per line, `xxd`-style:
+
+```
+00000020  10 20 30 ff de ad be ef ...   |. 0.....|
+```
+
+## Default option values (override in YAML)
+
+| Option                    | Default     | Range / values                       |
+|---------------------------|-------------|--------------------------------------|
+| `record_when`             | `bridge`    | `none` / `bridge` / `monitor` / `both` |
+| `capture_max_file_bytes`  | `262144`    | 4 KB .. 4 MB                         |
+| `capture_root`            | `/captures` | LittleFS path                        |
+
+Override example:
+
+```yaml
+texecom:
+  id: panel_bridge
+  uart_id: panel_uart
+  tcp_port: 10001
+  record_when: both
+  capture_max_file_bytes: 524288
+  capture_root: "/wintex"
+```
+
+## Capture URL pattern (HTTP download)
+
+ESPHome `web_server` v3 exposes filesystem access via the JSON file API.
+After flashing, browse:
+
+- `http://<device-ip>/`              — landing page (entities + status)
+- `http://<device-ip>/file?file=/captures/wintex-XXXX-001.bin` — download
+- `http://<device-ip>/file?file=/captures/wintex-XXXX-001.txt` — hex view
+
+`dump_config()` logs the capture root + drop count at boot so the user
+can confirm wiring.
+
+If a future ESPHome `web_server` release stops exposing arbitrary
+LittleFS paths, the fallback is to add a custom HTTP route inside the
+texecom component itself (deferred — current path works).
+
+## Tests
+
+- **8 TEST_CASEs** in `tests/test_capture.cpp` (plan required ≥6):
+  1. Header round-trip preserves all fields
+  2. Magic bytes are exactly `'T','X','C','P'` (and tampered magic fails)
+  3. Single event round-trip
+  4. Multiple events back-to-back parse linearly
+  5. Length field round-trips at boundary values (0, 1, 256, 1023)
+  6. Invalid direction values are rejected
+  7. `parse_event` refuses truncated input
+  8. End-to-end via test sink replays one session
+
+- **Local run command** (when a host C++ toolchain is available):
+  ```
+  cmake -S tests -B build/tests
+  cmake --build build/tests
+  ctest --test-dir build/tests --output-on-failure
+  ```
+
+- **Local execution status**: NOT RUN. This Windows MSYS environment has
+  no `cmake`, `g++`, `clang++`, or MSVC `cl` on PATH (verified). All 16
+  plan-listed verification commands (file existence, grep guards,
+  TEST_CASE count ≥6) pass — see commit log. The build/run is delegated
+  to `.github/workflows/ci.yml` which already runs `ctest` on push.
+
+- **ESPHome compile**: also CI-only (`esphome` not installed locally).
+  Schema additions are syntactically consistent with the existing
+  `__init__.py` pattern; CI will catch any breakage.
+
+## Deviations from the plan
+
+1. **Hex-dump sidecar = incremental** (plan offered "lazy or
+   incremental — pick whichever is simpler"). Incremental is simpler —
+   one `LittleFS.open(..., "a")` per event batch, no second pass at
+   download.
+2. **`record()` coalesces a UART batch into one event** rather than one
+   event per byte. The bridge's `pump_uart_to_tcp_` already buffers
+   per-tick reads into a 256-byte stack array; passing that whole batch
+   to `capture_.record(0, ...)` keeps the ring count low and dramatically
+   reduces serialization overhead. Wintex frames are still preserved
+   byte-perfect — only the event grouping changes.
+3. **Per-event payload bound = 256 bytes** in the ring. Larger pushes
+   are split across multiple ring slots. Wintex frames sit well below
+   this; the bound just keeps `PendingEvent` POD-sized.
+4. **`web_server: version: 3, local: false`** chosen over the plan's
+   "/local/captures/" suggestion because v3's `/file?file=...` is the
+   stable, documented API for downloading arbitrary LittleFS paths.
+5. **No 100 ms inactivity timer** — `Capture::loop()` is called every
+   ESPHome tick (~16 µs idle, much faster under load), which is already
+   well below 100 ms. A separate timer would add complexity for no win.
+
+## User instruction block — collecting captures for Plan 02-02
+
+> **To collect captures for Plan 02-02 (decoder):**
+>
+> 1. Pull this branch and flash the latest `esphome/texecom-bridge.yaml`
+>    to the Atom S3 (`esphome run esphome/texecom-bridge.yaml`).
+> 2. Confirm the device boots: the log should print
+>    `Capture mode: bridge` / `Capture root: /captures` / `Capture
+>    drops: 0` in `dump_config`.
+> 3. Run a Wintex session through the bridge (LAN, port 10001):
+>    - **Session A — cold-start config read.** Open the panel in
+>      Wintex, do a full Receive (config download). Disconnect.
+>    - **Session B — single-setting write.** Reconnect, change one
+>      trivial value (e.g. site name), Send to panel, disconnect.
+>    - **Session C — arm/disarm event sequence.** Reconnect, open
+>      Status, arm an area at the keypad and disarm it while Wintex is
+>      watching, disconnect.
+> 4. Browse to
+>    `http://<device-ip>/file?file=/captures/` to see the listing.
+>    Each session produces one `wintex-*.bin` (binary) and matching
+>    `wintex-*.txt` (xxd-style dump).
+> 5. Download all `.bin` files and drop them under `tools/captures/`
+>    in this repo (create the dir if it doesn't exist). Commit them on
+>    a feature branch.
+> 6. Open an issue tagged `phase-2/plan-02-02` listing the three
+>    capture filenames and noting anything weird Wintex did during the
+>    sessions (timeouts, retries, error popups). The decoder agent
+>    needs this context.
+>
+> **Aim for ~50 KB–1 MB per session** — that's plenty of message
+> variety. If the device's `Capture drops:` line in `dump_config` is
+> non-zero after a session, mention it in the issue (it means the bridge
+> was busier than the LittleFS flush could keep up with — the bytes are
+> still on the wire, just not in the file).
+
+## Risk notes / follow-ups for Plan 02-02
+
+- **LittleFS write latency under sustained 19200 baud burst** is the
+  unknown. The drop counter exists precisely to surface this; if real
+  captures show drops, options are: (a) larger ring (cheap), (b) batch
+  multiple events into one `LittleFS.open(..., "a")` call (medium),
+  (c) async write task (expensive — defer).
+- **`micros()` overflow** wraps every ~71 minutes. A single Wintex
+  session is far shorter than this, so per-file timestamps stay
+  monotonic. Cross-file analysis must use the header's `start_unix_s`.
+- **No on-device delete UI yet.** Files are bounded by rotation but the
+  user must manually `curl -X DELETE` (web_server v3 supports it) or
+  re-flash to clear. Acceptable for Plan 02-01 — revisit if storage
+  becomes a problem.

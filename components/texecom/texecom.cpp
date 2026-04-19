@@ -40,6 +40,13 @@ void Texecom::setup() {
   session_.reset();
   active_client_id_ = kNoClient;
 
+  // Capture: pick up panel name from the resolved model so dump_config
+  // and the on-disk header agree on what panel produced the bytes.
+  if (model_ != nullptr) {
+    capture_.set_panel_name(model_->name());
+  }
+  capture_.setup();
+
 #ifdef USE_ARDUINO
   server_ = new AsyncServer(tcp_port_);
   server_->onClient(
@@ -60,6 +67,9 @@ void Texecom::loop() {
   // both ring buffers live as members with std::array backing storage.
   pump_uart_to_tcp_();
   pump_tcp_to_uart_();
+  // Drain any queued capture events to LittleFS. Bounded work; safe to
+  // call every tick.
+  capture_.loop();
 }
 
 void Texecom::dump_config() {
@@ -72,6 +82,10 @@ void Texecom::dump_config() {
   }
   ESP_LOGCONFIG(TAG, "  Session:    %s", is_bridge_mode() ? "Bridge" : "Monitor");
   ESP_LOGCONFIG(TAG, "  Buffers:    %u bytes each direction", (unsigned) kBufferSize);
+  ESP_LOGCONFIG(TAG, "  Capture mode:  %s", capture_.mode_str());
+  ESP_LOGCONFIG(TAG, "  Capture max:   %u bytes/file", (unsigned) capture_.max_file_bytes());
+  ESP_LOGCONFIG(TAG, "  Capture root:  %s", capture_.root_path().c_str());
+  ESP_LOGCONFIG(TAG, "  Capture drops: %u events lost", (unsigned) capture_.drops());
 }
 
 float Texecom::get_setup_priority() const {
@@ -100,7 +114,7 @@ void Texecom::on_new_client_(AsyncClient *client) {
   if (t == Transition::Rejected) {
     ESP_LOGW(TAG, "Rejecting second TCP client from %s (session already active)",
              client_ip_(client).c_str());
-    client->close(true);
+    client->close();
     // AsyncClient takes care of freeing on its own disconnect callback.
     return;
   }
@@ -112,6 +126,7 @@ void Texecom::on_new_client_(AsyncClient *client) {
   tcp_to_uart_.clear();
 
   ESP_LOGI(TAG, "Session Monitor -> Bridge, client=%s", client_ip_(client).c_str());
+  capture_.on_session_start();
 
   client->onData(
       [](void *arg, AsyncClient *c, void *data, size_t len) {
@@ -142,6 +157,13 @@ void Texecom::on_client_data_(AsyncClient *client, void *data, size_t len) {
   }
 
   const uint8_t *bytes = static_cast<const uint8_t *>(data);
+  // Capture client->panel direction (1) BEFORE pushing into the ring so
+  // we record the byte stream as it arrived from the wire — even if a
+  // later byte gets back-pressured. Capture is best-effort; failures
+  // never block the bridge.
+  if (capture_.would_record() && len > 0) {
+    capture_.record(/*direction=*/1, bytes, len);
+  }
   for (size_t i = 0; i < len; ++i) {
     if (!tcp_to_uart_.push(bytes[i])) {
       // Back-pressure: do NOT drop config-write bytes. Stop ACKing until
@@ -167,6 +189,7 @@ void Texecom::on_client_disconnect_(AsyncClient *client) {
   Transition t = session_.on_disconnect(active_client_id_);
   if (t == Transition::EnteredMonitor) {
     ESP_LOGI(TAG, "Session Bridge -> Monitor (client disconnected)");
+    capture_.on_session_end();
   }
   // Flush remaining UART->TCP bytes to the panel side? No — direction
   // is UART->TCP; on client gone we just discard. Panel-bound writes
@@ -194,11 +217,19 @@ void Texecom::pump_uart_to_tcp_() {
   // 1. Drain the UART RX into the outbound ring buffer.
   //    drop-oldest overflow policy: Wintex will retry on timeout, so
   //    keeping the freshest bytes is better than wedging.
-  while (uart_->available()) {
+  //
+  //    We coalesce the UART bytes into a small stack buffer so the
+  //    capture call sees a single contiguous record per loop tick
+  //    rather than one event per byte (a 64-byte Wintex frame becomes
+  //    1 capture event instead of 64).
+  uint8_t rx_batch[256];
+  std::size_t rx_n = 0;
+  while (uart_->available() && rx_n < sizeof(rx_batch)) {
     uint8_t byte = 0;
     if (!uart_->read_byte(&byte)) {
       break;
     }
+    rx_batch[rx_n++] = byte;
     if (!uart_to_tcp_.push(byte)) {
       uart_to_tcp_.drop_oldest();
       (void) uart_to_tcp_.push(byte);
@@ -208,6 +239,11 @@ void Texecom::pump_uart_to_tcp_() {
                  (unsigned) uart_to_tcp_drops_);
       }
     }
+  }
+  // Record panel->client direction (0). would_record() short-circuits
+  // when capture is disabled / wrong-mode so the cost is negligible.
+  if (rx_n > 0 && capture_.would_record()) {
+    capture_.record(/*direction=*/0, rx_batch, rx_n);
   }
 
 #ifdef USE_ARDUINO

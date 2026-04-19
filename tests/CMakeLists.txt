@@ -4,6 +4,7 @@
 #   * RingBuffer<T, N>         -- tests/test_ring_buffer.cpp
 #   * SessionState             -- tests/test_session_state.cpp
 #   * PanelModel / Premier 24  -- tests/test_panel_model.cpp
+#   * Capture / TXCP format    -- tests/test_capture.cpp  (Plan 02-01)
 #
 # The ESPHome framework headers (esphome/core/*) are NOT pulled in. Only
 # the pure C++ headers under components/texecom/ are compiled here.
@@ -44,7 +45,9 @@ add_executable(texecom_tests
   test_ring_buffer.cpp
   test_session_state.cpp
   test_panel_model.cpp
+  test_capture.cpp
   ${TEXECOM_COMPONENT_DIR}/panel_model_premier24.cpp
+  ${TEXECOM_COMPONENT_DIR}/capture.cpp
 )
 
 target_include_directories(texecom_tests PRIVATE

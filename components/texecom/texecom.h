@@ -14,6 +14,7 @@
 #include "esphome/core/hal.h"
 #include "esphome/components/uart/uart.h"
 
+#include "capture.h"
 #include "panel_model.h"
 #include "ring_buffer.h"
 #include "session_state.h"
@@ -40,6 +41,12 @@ class Texecom : public Component {
   void set_uart_parent(uart::UARTComponent *parent) { uart_ = parent; }
   void set_tcp_port(uint16_t port) { tcp_port_ = port; }
   void set_panel_model(PanelModel *model) { model_ = model; }
+
+  // Capture configuration (Plan 02-01). All YAML-driven; safe to call
+  // multiple times before setup().
+  void set_capture_mode(Capture::Mode m) { capture_.set_mode(m); }
+  void set_capture_max_file_bytes(uint32_t n) { capture_.set_max_file_bytes(n); }
+  void set_capture_root(const std::string &p) { capture_.set_root_path(p); }
 
   // ESPHome Component lifecycle.
   void setup() override;
@@ -90,6 +97,9 @@ class Texecom : public Component {
   // Diagnostic counters (reset on setup).
   uint32_t uart_to_tcp_drops_{0};
   uint32_t tcp_to_uart_paused_ticks_{0};
+
+  // Capture sink (Plan 02-01). Owns its own LittleFS file handles.
+  Capture capture_{};
 };
 
 }  // namespace texecom

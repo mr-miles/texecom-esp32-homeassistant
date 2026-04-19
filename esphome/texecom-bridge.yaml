@@ -13,12 +13,16 @@
 esphome:
   name: texecom-bridge
   friendly_name: Texecom Bridge
-  # AsyncTCP fork maintained by ESPHome — upstream "AsyncTCP @ 1.1.1"
-  # uses the old FreeRTOS xQueueHandle typedef which was renamed to
-  # QueueHandle_t in the modern ESP-IDF that current Arduino-ESP32 ships.
-  # The esphome fork patches this and stays in sync with the toolchain.
+  # AsyncTCP fork maintained by ESPHome.
+  #
+  # Upstream "AsyncTCP @ 1.1.1" uses the removed xQueueHandle typedef.
+  # AsyncTCP-esphome 2.1.x added IPv6 support that requires the
+  # Arduino-ESP32 v3.x core (ships IPv6Address.h); ESPHome currently
+  # defaults to Arduino-ESP32 v2.x where that header doesn't exist, so
+  # 2.1.x fails to compile. Pin to the 2.0.x line which doesn't depend
+  # on IPv6Address.h and works on the v2.x core.
   libraries:
-    - "esphome/AsyncTCP-esphome@^2.1.4"
+    - "esphome/AsyncTCP-esphome@~2.0.1"
 
 esp32:
   board: m5stack-atoms3
@@ -42,6 +46,22 @@ logger:
   # otherwise flood the log. Comment these out when debugging.
   logs:
     uart: WARN
+
+# Plan 02-01: serve captured Wintex sessions over HTTP for download.
+# LAN-only deployment — auth deliberately disabled (matches the security
+# posture of the unauthenticated TCP bridge on port 10001).
+#
+# After a Wintex session, browse to:
+#   http://<device-ip>/                      — landing page
+#   http://<device-ip>/file?file=/captures/  — directory listing of captures
+#   http://<device-ip>/file?file=/captures/wintex-XXXX-001.bin  — download
+#   http://<device-ip>/file?file=/captures/wintex-XXXX-001.txt  — hex dump
+# (web_server v3 also exposes a built-in /local/ tree if compiled with
+# include_internal — fall back to /file?file= for portability.)
+web_server:
+  port: 80
+  version: 3
+  local: false
 
 api:
   encryption:
@@ -73,7 +93,15 @@ uart:
   rx_buffer_size: 1024
 
 # The TCP<->UART bridge.
+#
+# Capture options (Plan 02-01):
+#   record_when:           bridge | monitor | both | none   (default: bridge)
+#   capture_max_file_bytes: rotate at this size in bytes    (default: 262144)
+#   capture_root:           LittleFS directory for files    (default: /captures)
 texecom:
   id: panel_bridge
   uart_id: panel_uart
   tcp_port: 10001
+  record_when: bridge
+  capture_max_file_bytes: 262144
+  capture_root: "/captures"
