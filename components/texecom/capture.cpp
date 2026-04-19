@@ -5,7 +5,9 @@
 // serializers directly; the on-device persistence path is excluded.
 #ifdef USE_ARDUINO
 #include <Arduino.h>
-#include <FS.h>
+// LittleFS.h transitively includes FS.h on Arduino-ESP32; declaring
+// FS/LittleFS as build deps in __init__.py is what gets the headers
+// onto the include path.
 #include <LittleFS.h>
 #include <time.h>
 #include "esphome/core/log.h"

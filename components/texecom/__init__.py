@@ -72,5 +72,15 @@ async def to_code(config):
     cg.add(var.set_capture_max_file_bytes(config[CONF_CAPTURE_MAX_FILE_BYTES]))
     cg.add(var.set_capture_root(config[CONF_CAPTURE_ROOT]))
 
-    # AsyncTCP is fetched via esphome.libraries in the YAML.
-    cg.add_library("AsyncTCP", None)
+    # AsyncTCP is fetched by the YAML's esphome.libraries declaration
+    # (esphome/AsyncTCP-esphome@~2.0.1). Do NOT also declare bare
+    # "AsyncTCP" here — that causes PlatformIO to pull in the broken
+    # upstream library alongside the esphome fork.
+
+    # LittleFS access for capture persistence. FS and LittleFS are
+    # bundled with the Arduino-ESP32 core but ESPHome's external
+    # components don't pick them up automatically; declaring them
+    # here puts the framework headers on the include path so
+    # capture.cpp's `#include <LittleFS.h>` resolves.
+    cg.add_library("FS", None)
+    cg.add_library("LittleFS", None)
