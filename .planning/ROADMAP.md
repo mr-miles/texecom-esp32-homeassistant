@@ -128,7 +128,7 @@
 | Phase | Plans | Completed | Status |
 |-------|-------|-----------|--------|
 | 1. Serial-to-TCP Bridge | 3 | 1.5 | In progress (01-01 partial, 01-02 done, 01-03 pending hardware) |
-| 2. Wintex Protocol Capture & Decode | 3 | 0 | Not started |
+| 2. Wintex Protocol Capture & Decode | 3 | 0 | Planned |
 | 3. MQTT + HA Auto-Discovery | 2 | 0 | Not started |
 | 4. Panel-Powered Hardware | 2 | 0 | Not started |
 | 5. Community Release Polish | 2 | 0 | Not started |

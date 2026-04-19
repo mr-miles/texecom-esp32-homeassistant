@@ -1,9 +1,9 @@
 # Project State
 
 ## Current Position
-- **Phase**: 1 of 5 (in progress)
-- **Status**: Plan 01-02 complete; Plan 01-01 partial (spec locked, bench evidence pending hardware); Plan 01-03 queued for user hardware time
-- **Last Activity**: Phase 1 build — code-side deliverables (2026-04-19)
+- **Phase**: 1 in progress, Phase 2 planned
+- **Status**: Phase 1 — code shipped + CI green; Plans 01-01 (bench) and 01-03 (Wintex validation) await user hardware time. Phase 2 — 3 plans across 3 sequential waves, second wave hardware-gated on user-supplied capture sessions.
+- **Last Activity**: Phase 2 planning + ESP32 build fix (AsyncTCP fork) (2026-04-19)
 
 ## Progress
 ```
@@ -18,16 +18,21 @@
 - **Panel scope**: Premier 24 only in v1; architecture keeps other Premier Elite models additive
 - **Testing**: Unit tests required for all protocol/decoder/bridge code; hardware phases use scope/multimeter evidence
 - **Commit cadence**: Commit planning changes and code changes regularly (per user preference)
-- **Phase 1 spec lock-in (2026-04-19)**: GPIO5 TX / GPIO6 RX, 19200 8N2, port 10001, AsyncTCP transport — values lifted from RoganDawes ESPHome_Wintex `example.yaml` and the universaldiscoverymethodology.com 2015 reference. Plan 01-01's wiring doc became a forward spec rather than a discovery exercise.
-- **Phase 1 split execution**: Plan 01-02 ran in parallel with Plan 01-01 Task 1 (both agent-doable); Plan 01-01 Tasks 2-3 and Plan 01-03 await user-with-hardware time. Host C++ toolchain (cmake/g++/cl) is not installed in this environment — unit tests written but unverified locally; user will need to install one (VS Build Tools, MinGW, or WSL) to run them.
+- **Phase 1 spec lock-in (2026-04-19)**: GPIO5 TX / GPIO6 RX, 19200 8N2, port 10001, AsyncTCP transport
+- **Phase 1 build artefacts**: components/texecom/* + tests/* + esphome/texecom-bridge.yaml + CI green
+- **AsyncTCP library (2026-04-19)**: Switched from upstream `AsyncTCP@1.1.1` to `esphome/AsyncTCP-esphome@^2.1.4` after ESP32 build failure (`xQueueHandle` was renamed to `QueueHandle_t` in modern ESP-IDF; ESPHome's fork tracks the toolchain)
+- **Phase 2 decomposition**: 3 sequential waves — capture infrastructure → grammar+decoder (hardware-gated on user captures) → regression tests + phase close. Decoder is host-testable (no AsyncTCP dependency in its public API), gated to Monitor mode (Bridge mode pauses decoding per Wintex-exclusivity decision).
+- **Phase 2 agents**: senior-developer + backend-architect (02-01); data-analytics-reporter + senior-developer (02-02); api-tester + evidence-collector + reality-checker (02-03)
 
-## Hardware Setup Required Before Plan 01-03
+## Hardware Setup Required Before Closing Phase 1 / Starting Phase 2
 1. Wire Atom S3 ↔ Premier 24 per `.planning/hardware/phase-1-wiring.md`
-2. Create `esphome/secrets.yaml` from `secrets.yaml.example` (Wi-Fi creds, OTA password, API key)
+2. Create `esphome/secrets.yaml` from `secrets.yaml.example`
 3. Flash `esphome/texecom-bridge.yaml` via `esphome run esphome/texecom-bridge.yaml`
 4. Install Wintex on a LAN-connected Windows box; configure UDL connection to `texecom-bridge.local:10001`
-5. (Optional) Install C++ toolchain so `cmake -S tests -B build/tests && ctest --test-dir build/tests` runs
+5. Run a Wintex session to close Plan 01-03 (Phase 1 done)
+6. Build Phase 2 Plan 02-01 (adds capture infra), reflash, capture ≥3 Wintex sessions covering: cold-start full Receive, single-setting Send + verify, arm/disarm + tamper events
+7. Drop captured `.bin` files under `tools/captures/` so Plan 02-02 can decode them
 
 ## Next Action
-- **If hardware is ready**: continue to Plan 01-03 (Wintex end-to-end validation) — re-invoke `/legion:build` and the agents will guide you through the validation tests
-- **If hardware is not ready**: project is in a clean checkpoint; resume `/legion:build` whenever the bench is ready, or run `/legion:plan 2` early if you want to lay out Phase 2 in parallel
+- **If hardware is ready**: continue `/legion:build` for Phase 1 Plan 01-03 (Wintex validation) → close Phase 1 → `/legion:build` for Phase 2 Plan 02-01 (capture infra)
+- **If hardware is not ready**: Phase 2 plans are ready; Phase 1 code + Phase 2 plan files can be reviewed offline. Resume `/legion:build` whenever the bench is ready.
