@@ -13,11 +13,12 @@
 esphome:
   name: texecom-bridge
   friendly_name: Texecom Bridge
-  # AsyncTCP is an Arduino-framework library; the texecom component uses
-  # AsyncServer/AsyncClient so we fetch it here. If you migrate to the
-  # esp-idf framework later, swap for ESPAsyncTCP / ESPHome sockets.
+  # AsyncTCP fork maintained by ESPHome — upstream "AsyncTCP @ 1.1.1"
+  # uses the old FreeRTOS xQueueHandle typedef which was renamed to
+  # QueueHandle_t in the modern ESP-IDF that current Arduino-ESP32 ships.
+  # The esphome fork patches this and stays in sync with the toolchain.
   libraries:
-    - "AsyncTCP @ 1.1.1"
+    - "esphome/AsyncTCP-esphome@^2.1.4"
 
 esp32:
   board: m5stack-atoms3
