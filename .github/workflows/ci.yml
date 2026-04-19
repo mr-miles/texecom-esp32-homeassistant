@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  host-tests:
+    name: Host C++ unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Catch2 fetch
+        uses: actions/cache@v4
+        with:
+          path: build/tests/_deps
+          key: catch2-v3.5.2-${{ runner.os }}
+
+      - name: Configure (CMake)
+        run: cmake -S tests -B build/tests -DCMAKE_BUILD_TYPE=Release -Wno-dev
+
+      - name: Build
+        run: cmake --build build/tests --config Release --parallel
+
+      - name: Run tests (ctest)
+        run: ctest --test-dir build/tests --output-on-failure --no-tests=error
+
+  esphome-compile:
+    name: ESPHome compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install ESPHome
+        run: pip install esphome
+
+      - name: Generate CI secrets
+        # Real deployments use esphome/secrets.yaml (gitignored). CI compiles
+        # against a dummy file with a valid-shape api_encryption_key so the
+        # YAML resolves but the binary is unusable as a real device.
+        run: |
+          cat > esphome/secrets.yaml <<'EOF'
+          wifi_ssid: "ci-dummy-ssid"
+          wifi_password: "ci-dummy-wifi-password"
+          ota_password: "ci-dummy-ota-password"
+          api_encryption_key: "kDBeOpf+ZAMPQX1IqvLqGMmdBjxJZBEsr3UaFYU+vzg="
+          EOF
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: platformio-${{ runner.os }}-${{ hashFiles('esphome/texecom-bridge.yaml') }}
+          restore-keys: |
+            platformio-${{ runner.os }}-
+
+      - name: Compile esphome/texecom-bridge.yaml
+        run: esphome compile esphome/texecom-bridge.yaml
