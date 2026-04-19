@@ -1,0 +1,21 @@
+# ESPHome / Python / build artefacts
+esphome/secrets.yaml
+esphome/.esphome/
+esphome/build/
+.esphome/
+
+# CMake / C++ host test build output
+build/
+cmake-build-*/
+
+# Python venv + caches
+__pycache__/
+*.pyc
+.venv/
+
+# Editor junk
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
