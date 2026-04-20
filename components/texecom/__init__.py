@@ -17,7 +17,11 @@ from esphome.components import uart
 from esphome.const import CONF_ID, CONF_PORT
 
 CODEOWNERS = ["@mr_miles"]
-DEPENDENCIES = ["uart", "network"]
+# `socket` pulls in ESPHome's native TCP API (esphome/components/socket/).
+# The Plan 01-02 scaffold used a callback-based TCP library here; it was
+# swapped out because the upstream forks kept breaking across
+# Arduino-ESP32 revisions.
+DEPENDENCIES = ["uart", "network", "socket"]
 AUTO_LOAD = []
 
 CONF_UART_ID = "uart_id"
@@ -72,10 +76,9 @@ async def to_code(config):
     cg.add(var.set_capture_max_file_bytes(config[CONF_CAPTURE_MAX_FILE_BYTES]))
     cg.add(var.set_capture_root(config[CONF_CAPTURE_ROOT]))
 
-    # AsyncTCP is fetched by the YAML's esphome.libraries declaration
-    # (esphome/AsyncTCP-esphome@~2.0.1). Do NOT also declare bare
-    # "AsyncTCP" here — that causes PlatformIO to pull in the broken
-    # upstream library alongside the esphome fork.
+    # TCP listener uses ESPHome's native `socket` component (declared in
+    # DEPENDENCIES). No third-party TCP library is required — the
+    # previous callback-driven TCP library has been removed.
 
     # LittleFS access for capture persistence. FS and LittleFS are
     # bundled with the Arduino-ESP32 core but ESPHome's external

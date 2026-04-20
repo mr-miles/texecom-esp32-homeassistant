@@ -1,6 +1,13 @@
 #include "texecom.h"
 
+#include <array>
+#include <cerrno>
+#include <cstring>
+#include <span>
+
 #include "esphome/core/log.h"
+#include "esphome/components/socket/headers.h"
+#include "esphome/components/socket/socket.h"
 
 #include "panel_model_premier24.h"
 
@@ -11,17 +18,30 @@ static const char *const TAG = "texecom";
 
 // ---------- helpers ----------------------------------------------------------
 
-#ifdef USE_ARDUINO
-static std::string client_ip_(AsyncClient *c) {
-  if (c == nullptr) {
-    return "<null>";
+// Format a peer sockaddr into `out` (fixed-size buffer of exactly
+// socket::SOCKADDR_STR_LEN chars). Always null-terminates. Falls back
+// to "<unknown>" on error.
+static void format_peer_(socket::Socket *sock,
+                         std::span<char, socket::SOCKADDR_STR_LEN> out) {
+  if (sock == nullptr) {
+    std::strncpy(out.data(), "<unknown>", out.size() - 1);
+    out[out.size() - 1] = '\0';
+    return;
   }
-  IPAddress ip = c->remoteIP();
-  char buf[24];
-  snprintf(buf, sizeof(buf), "%u.%u.%u.%u:%u", ip[0], ip[1], ip[2], ip[3], c->remotePort());
-  return std::string(buf);
+  std::size_t n = sock->getpeername_to(out);
+  if (n == 0 || n >= out.size()) {
+    std::strncpy(out.data(), "<unknown>", out.size() - 1);
+    out[out.size() - 1] = '\0';
+  } else {
+    out[n] = '\0';
+  }
 }
-#endif
+
+// Is `errno` a non-fatal "would block"? lwip/BSD use EAGAIN /
+// EWOULDBLOCK; some stacks also surface EINPROGRESS for accept.
+static inline bool would_block_() {
+  return errno == EAGAIN || errno == EWOULDBLOCK;
+}
 
 // ---------- Component lifecycle ---------------------------------------------
 
@@ -35,10 +55,13 @@ void Texecom::setup() {
 
   uart_to_tcp_.clear();
   tcp_to_uart_.clear();
+  send_stage_len_ = 0;
+  send_stage_off_ = 0;
   uart_to_tcp_drops_ = 0;
   tcp_to_uart_paused_ticks_ = 0;
   session_.reset();
   active_client_id_ = kNoClient;
+  next_client_id_ = 1;
 
   // Capture: pick up panel name from the resolved model so dump_config
   // and the on-disk header agree on what panel produced the bytes.
@@ -47,24 +70,62 @@ void Texecom::setup() {
   }
   capture_.setup();
 
-#ifdef USE_ARDUINO
-  server_ = new AsyncServer(tcp_port_);
-  server_->onClient(
-      [](void *arg, AsyncClient *c) {
-        static_cast<Texecom *>(arg)->on_new_client_(c);
-      },
-      this);
-  server_->begin();
+  // Create the TCP listener. `socket_listen()` returns a ListenSocket,
+  // which on the LWIP_TCP backend is a distinct type from Socket (the
+  // raw-TCP connected class can't listen). AF_INET is explicit here
+  // because Wintex is IPv4-only on the LAN segments we deploy to; if
+  // we ever need IPv6 here we can check USE_NETWORK_IPV6.
+  listener_ = socket::socket_listen(AF_INET, SOCK_STREAM, 0);
+  if (listener_ == nullptr) {
+    ESP_LOGE(TAG, "Could not create listening socket");
+    this->mark_failed();
+    return;
+  }
+
+  int err = listener_->setblocking(false);
+  if (err != 0) {
+    ESP_LOGW(TAG, "setblocking(false) failed: errno=%d", errno);
+  }
+
+  int enable = 1;
+  err = listener_->setsockopt(SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
+  if (err != 0) {
+    ESP_LOGW(TAG, "SO_REUSEADDR failed: errno=%d", errno);
+  }
+
+  // Bind AF_INET any-address. We construct sockaddr_in directly rather
+  // than using socket::set_sockaddr_any(), because that helper picks
+  // AF_INET6 on builds that enable IPv6 — which would fail to bind to
+  // the AF_INET listener we just created above.
+  struct sockaddr_in bind_addr{};
+  bind_addr.sin_family = AF_INET;
+  bind_addr.sin_addr.s_addr = htonl(ESPHOME_INADDR_ANY);
+  bind_addr.sin_port = htons(tcp_port_);
+  err = listener_->bind(reinterpret_cast<struct sockaddr *>(&bind_addr), sizeof(bind_addr));
+  if (err != 0) {
+    ESP_LOGE(TAG, "bind(port=%u) failed: errno=%d", tcp_port_, errno);
+    this->mark_failed();
+    return;
+  }
+
+  // backlog=1 — single-client policy means we never queue beyond the
+  // one currently-being-rejected connection.
+  err = listener_->listen(1);
+  if (err != 0) {
+    ESP_LOGE(TAG, "listen() failed: errno=%d", errno);
+    this->mark_failed();
+    return;
+  }
+
   ESP_LOGI(TAG, "TCP listener started on port %u (panel=%s)", tcp_port_,
            model_ != nullptr ? model_->name() : "<none>");
-#else
-  ESP_LOGW(TAG, "USE_ARDUINO not defined — TCP listener disabled (host unit-test build?)");
-#endif
 }
 
 void Texecom::loop() {
-  // Cooperative byte-shuttling. No allocation inside this function —
-  // both ring buffers live as members with std::array backing storage.
+  // Cooperative byte-shuttling. No allocation inside these helpers —
+  // both ring buffers live as members with std::array backing storage,
+  // and the stack staging buffers are fixed-size.
+  accept_pending_client_();
   pump_uart_to_tcp_();
   pump_tcp_to_uart_();
   // Drain any queued capture events to LittleFS. Bounded work; safe to
@@ -88,124 +149,110 @@ void Texecom::dump_config() {
   ESP_LOGCONFIG(TAG, "  Capture drops: %u events lost", (unsigned) capture_.drops());
 }
 
+void Texecom::on_shutdown() {
+  // Close the client first (so the peer sees a clean FIN), then the
+  // listener. Both unique_ptr<Socket> destructors also close on reset()
+  // but closing explicitly here makes the sequence easy to reason about.
+  if (client_socket_) {
+    client_socket_->close();
+    client_socket_.reset();
+  }
+  if (listener_) {
+    listener_->close();
+    listener_.reset();
+  }
+}
+
 float Texecom::get_setup_priority() const {
   // After WiFi (which is AFTER_WIFI = 250) but before USER (1000).
   // The TCP listener needs network up; nothing else depends on this.
   return setup_priority::AFTER_WIFI;
 }
 
-// ---------- AsyncTCP callbacks ----------------------------------------------
+// ---------- accept / session lifecycle --------------------------------------
 
-#ifdef USE_ARDUINO
+void Texecom::reject_client_(std::unique_ptr<socket::Socket> pending,
+                             const char *peer_str) {
+  ESP_LOGW(TAG, "Rejecting second TCP client from %s (session already active)",
+           peer_str);
+  if (pending) {
+    pending->close();
+  }
+}
 
-void Texecom::on_new_client_(AsyncClient *client) {
-  if (client == nullptr) {
+void Texecom::accept_pending_client_() {
+  if (!listener_) {
     return;
   }
 
-  // Assign this connection an id BEFORE consulting session state so
-  // on_disconnect matches correctly even for rejected clients.
+  // We use getpeername_to() on the accepted socket to format the peer
+  // address; no need to have accept() fill the sockaddr as well.
+  std::unique_ptr<socket::Socket> pending = listener_->accept(nullptr, nullptr);
+  if (!pending) {
+    // No pending connection (EAGAIN) or transient failure — retry next
+    // tick. The socket layer already logs spurious errors.
+    return;
+  }
+
+  std::array<char, socket::SOCKADDR_STR_LEN> peer_buf{};
+  format_peer_(pending.get(),
+               std::span<char, socket::SOCKADDR_STR_LEN>{peer_buf.data(), peer_buf.size()});
+  const char *peer_str = peer_buf.data();
+
+  // Assign an id BEFORE consulting session state so any subsequent
+  // disconnect matches correctly even for rejected clients. Skip id=0
+  // (reserved for kNoClient).
   ClientId id = next_client_id_++;
   if (next_client_id_ == kNoClient) {
-    next_client_id_ = 1;  // wrap, skipping reserved 0
+    next_client_id_ = 1;
   }
 
   Transition t = session_.on_connect(id);
   if (t == Transition::Rejected) {
-    ESP_LOGW(TAG, "Rejecting second TCP client from %s (session already active)",
-             client_ip_(client).c_str());
-    client->close();
-    // AsyncClient takes care of freeing on its own disconnect callback.
+    reject_client_(std::move(pending), peer_str);
     return;
   }
 
   // Accepted — promote to active session.
-  client_ = client;
+  int err = pending->setblocking(false);
+  if (err != 0) {
+    ESP_LOGW(TAG, "Client setblocking(false) failed: errno=%d", errno);
+  }
+  // Disable Nagle so Wintex request/response packets ship immediately
+  // instead of coalescing into 40 ms delays. Wintex is a chatty
+  // synchronous protocol, so this is a net win.
+  int enable = 1;
+  (void) pending->setsockopt(IPPROTO_TCP, TCP_NODELAY, &enable, sizeof(enable));
+
+  client_socket_ = std::move(pending);
   active_client_id_ = id;
   uart_to_tcp_.clear();
   tcp_to_uart_.clear();
+  send_stage_len_ = 0;
+  send_stage_off_ = 0;
 
-  ESP_LOGI(TAG, "Session Monitor -> Bridge, client=%s", client_ip_(client).c_str());
+  ESP_LOGI(TAG, "Session Monitor -> Bridge, client=%s", peer_str);
   capture_.on_session_start();
-
-  client->onData(
-      [](void *arg, AsyncClient *c, void *data, size_t len) {
-        static_cast<Texecom *>(arg)->on_client_data_(c, data, len);
-      },
-      this);
-  client->onDisconnect(
-      [](void *arg, AsyncClient *c) {
-        static_cast<Texecom *>(arg)->on_client_disconnect_(c);
-      },
-      this);
-  client->onError(
-      [](void *arg, AsyncClient *c, int8_t e) {
-        static_cast<Texecom *>(arg)->on_client_error_(c, e);
-      },
-      this);
-  client->onTimeout(
-      [](void *arg, AsyncClient *c, uint32_t) {
-        static_cast<Texecom *>(arg)->on_client_disconnect_(c);
-      },
-      this);
 }
 
-void Texecom::on_client_data_(AsyncClient *client, void *data, size_t len) {
-  if (client != client_) {
-    // Stray callback from a rejected / stale client — ignore.
-    return;
+void Texecom::end_session_(const char *reason) {
+  if (client_socket_) {
+    client_socket_->close();
+    client_socket_.reset();
   }
-
-  const uint8_t *bytes = static_cast<const uint8_t *>(data);
-  // Capture client->panel direction (1) BEFORE pushing into the ring so
-  // we record the byte stream as it arrived from the wire — even if a
-  // later byte gets back-pressured. Capture is best-effort; failures
-  // never block the bridge.
-  if (capture_.would_record() && len > 0) {
-    capture_.record(/*direction=*/1, bytes, len);
-  }
-  for (size_t i = 0; i < len; ++i) {
-    if (!tcp_to_uart_.push(bytes[i])) {
-      // Back-pressure: do NOT drop config-write bytes. Stop ACKing until
-      // loop() drains. AsyncTCP doesn't expose a clean "pause" on
-      // esp-idf, but ack'ing less-than-received throttles the peer.
-      ++tcp_to_uart_paused_ticks_;
-      if (client_ != nullptr) {
-        // Ack only the bytes we managed to buffer.
-        client_->ack(i);
-      }
-      return;
-    }
-  }
-  // All bytes accepted — ack the full length so the TCP window reopens.
-  if (client_ != nullptr) {
-    client_->ack(len);
-  }
-}
-
-void Texecom::on_client_disconnect_(AsyncClient *client) {
-  // Use the id we stashed at accept time, not whatever `client` is now —
-  // it may already be torn down.
   Transition t = session_.on_disconnect(active_client_id_);
   if (t == Transition::EnteredMonitor) {
-    ESP_LOGI(TAG, "Session Bridge -> Monitor (client disconnected)");
+    ESP_LOGI(TAG, "Session Bridge -> Monitor (%s)", reason);
     capture_.on_session_end();
   }
-  // Flush remaining UART->TCP bytes to the panel side? No — direction
-  // is UART->TCP; on client gone we just discard. Panel-bound writes
-  // already in tcp_to_uart_ get drained into the UART by loop().
-  client_ = nullptr;
   active_client_id_ = kNoClient;
-  (void) client;
+  // Drop any UART->TCP send-stage bytes — they were destined for the
+  // departed client and should not be replayed to a future session.
+  send_stage_len_ = 0;
+  send_stage_off_ = 0;
+  // Do NOT clear the ring buffers — panel-bound bytes already staged
+  // in tcp_to_uart_ get drained on subsequent ticks regardless.
 }
-
-void Texecom::on_client_error_(AsyncClient *client, int8_t error) {
-  ESP_LOGW(TAG, "TCP client error %d from %s", (int) error,
-           client_ip_(client).c_str());
-  on_client_disconnect_(client);
-}
-
-#endif  // USE_ARDUINO
 
 // ---------- loop() pumps ----------------------------------------------------
 
@@ -246,46 +293,106 @@ void Texecom::pump_uart_to_tcp_() {
     capture_.record(/*direction=*/0, rx_batch, rx_n);
   }
 
-#ifdef USE_ARDUINO
-  // 2. Push as much of the ring as the TCP send window will accept.
-  //    Only stage what we know will fit — that way we never have to
-  //    un-pop bytes and there's no risk of reordering with bytes the
-  //    UART drains on the NEXT loop tick.
-  if (client_ == nullptr || !client_->connected() || uart_to_tcp_.empty()) {
+  // 2. Ring -> socket. Only runs in Bridge mode with an active client.
+  if (!is_bridge_mode() || !client_socket_) {
     return;
   }
 
-  size_t space = client_->space();
-  if (space == 0) {
-    return;  // TCP window full; try next tick.
-  }
-
-  static constexpr size_t kStageSize = 256;
-  uint8_t stage[kStageSize];
-  size_t budget = space < kStageSize ? space : kStageSize;
-  size_t n = 0;
-  while (n < budget) {
-    uint8_t b = 0;
-    if (!uart_to_tcp_.pop(b)) {
-      break;
+  // We keep a persistent stage buffer (`send_stage_`) that holds any
+  // tail bytes the socket refused on the previous tick. This avoids
+  // needing a "push to front" primitive on the ring — ordering is
+  // preserved because the stage is always fully drained before we
+  // pull more bytes from the ring.
+  while (true) {
+    // Refill the stage from the ring if it is empty.
+    if (send_stage_off_ >= send_stage_len_) {
+      send_stage_off_ = 0;
+      send_stage_len_ = 0;
+      while (send_stage_len_ < send_stage_.size()) {
+        uint8_t b = 0;
+        if (!uart_to_tcp_.pop(b)) {
+          break;
+        }
+        send_stage_[send_stage_len_++] = b;
+      }
+      if (send_stage_len_ == 0) {
+        return;  // ring empty and nothing pending — done.
+      }
     }
-    stage[n++] = b;
+
+    const uint8_t *ptr = send_stage_.data() + send_stage_off_;
+    std::size_t remaining = send_stage_len_ - send_stage_off_;
+    // Use write() (not send()) — it is present on all three ESPHome
+    // socket backends (BSD, LwIP sockets, LwIP raw TCP). The client
+    // socket is non-blocking (setblocking(false) at accept), so write()
+    // returns immediately on a full send buffer.
+    ssize_t sent = client_socket_->write(ptr, remaining);
+    if (sent < 0) {
+      if (would_block_()) {
+        // Socket send buffer is full — keep stage bytes for next tick.
+        return;
+      }
+      ESP_LOGW(TAG, "write() failed: errno=%d, ending session", errno);
+      end_session_("write error");
+      return;
+    }
+
+    send_stage_off_ += (std::size_t) sent;
+    if ((std::size_t) sent < remaining) {
+      // Short send — socket window is full; retry next tick.
+      return;
+    }
+    // Full send — loop and refill stage from the ring if more is waiting.
   }
-  if (n == 0) {
-    return;
-  }
-  client_->write(reinterpret_cast<const char *>(stage), n);
-  client_->send();
-#endif
 }
 
 void Texecom::pump_tcp_to_uart_() {
   if (uart_ == nullptr) {
     return;
   }
-  // Drain tcp_to_uart_ into the UART TX. write_byte() buffers inside
-  // the ESPHome UART driver; we push until either the ring is empty or
-  // the UART reports it can't accept more.
+
+  // 1. Socket -> ring. Only read if the ring has room (never drop
+  //    panel-bound bytes — corrupting a config write would wedge the
+  //    panel). When the ring is full we stop calling recv(); the TCP
+  //    receive window will close naturally and throttle the peer.
+  if (is_bridge_mode() && client_socket_) {
+    while (!tcp_to_uart_.full()) {
+      uint8_t buf[256];
+      // Read at most the ring's remaining space so we never need to
+      // drop a byte we already pulled off the socket.
+      std::size_t room = kBufferSize - tcp_to_uart_.size();
+      std::size_t want = room < sizeof(buf) ? room : sizeof(buf);
+      ssize_t n = client_socket_->read(buf, want);
+      if (n == 0) {
+        // Peer closed cleanly.
+        end_session_("client disconnected");
+        return;
+      }
+      if (n < 0) {
+        if (would_block_()) {
+          break;  // No data available right now.
+        }
+        ESP_LOGW(TAG, "recv() failed: errno=%d, ending session", errno);
+        end_session_("recv error");
+        return;
+      }
+
+      for (ssize_t i = 0; i < n; ++i) {
+        (void) tcp_to_uart_.push(buf[i]);  // ring had room (checked above)
+      }
+      if (capture_.would_record()) {
+        capture_.record(/*direction=*/1, buf, (std::size_t) n);
+      }
+    }
+    if (tcp_to_uart_.full()) {
+      ++tcp_to_uart_paused_ticks_;
+    }
+  }
+
+  // 2. Ring -> UART. write_byte() buffers inside the ESPHome UART
+  //    driver; we push until either the ring is empty or (by design)
+  //    the driver absorbs it all. ESPHome's UART::write_byte is
+  //    best-effort — there is no backpressure path from the driver.
   uint8_t b = 0;
   while (tcp_to_uart_.peek(b)) {
     uart_->write_byte(b);

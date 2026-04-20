@@ -9,22 +9,26 @@
 // Phase 1 responsibility: transparent byte pipe + Monitor/Bridge state
 // tracking. Phase 2 adds protocol decode. Phase 3 gates MQTT publishing
 // on `is_bridge_mode()`.
+//
+// Transport: ESPHome's own `socket::Socket` API (see
+// `esphome/components/socket/socket.h`). Callbacks are NOT used — the
+// listener and client socket are polled cooperatively from `loop()`.
+// This replaces the Plan 01-02 callback-driven implementation, whose
+// external library pin kept breaking across Arduino-ESP32 revisions.
+
+#include <array>
+#include <cstddef>
+#include <memory>
 
 #include "esphome/core/component.h"
 #include "esphome/core/hal.h"
 #include "esphome/components/uart/uart.h"
+#include "esphome/components/socket/socket.h"
 
 #include "capture.h"
 #include "panel_model.h"
 #include "ring_buffer.h"
 #include "session_state.h"
-
-// AsyncTCP is provided via the AsyncTCP library declared in the ESPHome
-// YAML. It is an Arduino-framework library; the texecom component
-// therefore requires `framework: arduino` (set in the YAML).
-#ifdef USE_ARDUINO
-#include <AsyncTCP.h>
-#endif
 
 namespace esphome {
 namespace texecom {
@@ -52,6 +56,7 @@ class Texecom : public Component {
   void setup() override;
   void loop() override;
   void dump_config() override;
+  void on_shutdown() override;
   float get_setup_priority() const override;
 
   // Public accessors.
@@ -64,28 +69,29 @@ class Texecom : public Component {
   uint16_t tcp_port() const { return tcp_port_; }
 
  protected:
-#ifdef USE_ARDUINO
-  // AsyncTCP event plumbing.
-  void on_new_client_(AsyncClient *client);
-  void on_client_data_(AsyncClient *client, void *data, size_t len);
-  void on_client_disconnect_(AsyncClient *client);
-  void on_client_error_(AsyncClient *client, int8_t error);
-#endif
-
-  // loop() helpers.
+  // loop() helpers. Called in order every tick.
+  void accept_pending_client_();
   void pump_uart_to_tcp_();
   void pump_tcp_to_uart_();
+
+  // Teardown helper — called when recv() returns 0/error or by
+  // on_shutdown(). Idempotent.
+  void end_session_(const char *reason);
+
+  // Reject the given pending socket (second-client policy). The socket
+  // is closed and dropped; the session state is NOT mutated.
+  void reject_client_(std::unique_ptr<socket::Socket> pending,
+                      const char *peer_str);
 
   // Config.
   uart::UARTComponent *uart_{nullptr};
   PanelModel *model_{nullptr};
   uint16_t tcp_port_{10001};
 
-  // Runtime.
-#ifdef USE_ARDUINO
-  AsyncServer *server_{nullptr};
-  AsyncClient *client_{nullptr};
-#endif
+  // Runtime — ESPHome socket handles.
+  std::unique_ptr<socket::ListenSocket> listener_{};
+  std::unique_ptr<socket::Socket> client_socket_{};
+
   SessionState session_{};
   ClientId next_client_id_{1};  // 0 is reserved for "no client"
   ClientId active_client_id_{kNoClient};
@@ -93,6 +99,15 @@ class Texecom : public Component {
   // Backpressure ring buffers (stack/static — zero heap on the hot path).
   RingBuffer<uint8_t, kBufferSize> uart_to_tcp_{};
   RingBuffer<uint8_t, kBufferSize> tcp_to_uart_{};
+
+  // Persistent send stage for UART->TCP. Holds any tail bytes that the
+  // socket refused on the previous tick (short send / EAGAIN). Must be
+  // flushed before staging new bytes from `uart_to_tcp_` to preserve
+  // byte ordering.
+  static constexpr std::size_t kSendStageSize = 256;
+  std::array<uint8_t, kSendStageSize> send_stage_{};
+  std::size_t send_stage_len_{0};
+  std::size_t send_stage_off_{0};  // bytes already sent from send_stage_
 
   // Diagnostic counters (reset on setup).
   uint32_t uart_to_tcp_drops_{0};
