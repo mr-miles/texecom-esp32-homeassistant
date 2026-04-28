@@ -62,6 +62,31 @@ api:
   encryption:
     key: !secret api_encryption_key
 
+# Phase 1.5 — MQTT bring-up.
+# This block ships ahead of any Texecom-decoded panel data so we can prove
+# the broker/network/HA-discovery integration end-to-end using only ESPHome
+# built-ins. Phase 3 will later layer decoded panel sensors on top of this
+# same topic taxonomy. Birth/will messages drive HA's availability state for
+# every entity attached to this device.
+mqtt:
+  broker: !secret mqtt_broker_host
+  username: !secret mqtt_broker_username
+  password: !secret mqtt_broker_password
+  # Default port 1883; bump only if the user runs Mosquitto elsewhere.
+  # Discovery is enabled by default — entities auto-appear in HA.
+  topic_prefix: texecom-bridge
+  birth_message:
+    topic: texecom-bridge/status
+    payload: online
+    retain: true
+  will_message:
+    topic: texecom-bridge/status
+    payload: offline
+    retain: true
+  # Phase 3 will add Texecom-decoded sensors here. Phase 1.5 only carries
+  # device-health entities, declared in the binary_sensor: and sensor:
+  # blocks below.
+
 ota:
   - platform: esphome
     password: !secret ota_password
@@ -100,3 +125,33 @@ texecom:
   record_when: bridge
   capture_max_file_bytes: 262144
   capture_root: "/captures"
+
+# Phase 1.5 device-health entities. These are independent of any panel
+# data — they exercise the MQTT discovery path end-to-end so Phase 3 can
+# build on a known-good integration. Each entity carries a "Texecom Bridge"
+# prefix so HA derives predictable entity_ids
+# (binary_sensor.texecom_bridge_status, sensor.texecom_bridge_cpu_temperature,
+# sensor.texecom_bridge_wifi_signal).
+binary_sensor:
+  - platform: template
+    name: "Texecom Bridge Status"
+    id: bridge_status
+    device_class: connectivity
+    # ESPHome's mqtt component automatically publishes the device's
+    # availability via the topic_prefix/status pattern. The HA-side
+    # discovery message ties this entity to the same availability
+    # topic, so the entity goes "unavailable" when the will message
+    # fires.
+    lambda: |-
+      return true;
+
+sensor:
+  - platform: internal_temperature
+    name: "Texecom Bridge CPU Temperature"
+    id: bridge_cpu_temp
+    update_interval: 60s
+
+  - platform: wifi_signal
+    name: "Texecom Bridge WiFi Signal"
+    id: bridge_wifi_signal
+    update_interval: 60s

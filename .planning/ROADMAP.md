@@ -3,6 +3,7 @@
 ## Phases
 
 - [ ] **Phase 1** — Serial-to-TCP Bridge (Wintex-over-LAN)
+- [ ] **Phase 1.5** — MQTT Bring-up (Bridge Health to HA)
 - [ ] **Phase 2** — Wintex Protocol Capture & Decode
 - [ ] **Phase 3** — MQTT + Home Assistant Auto-Discovery
 - [ ] **Phase 4** — Panel-Powered Hardware
@@ -31,6 +32,31 @@
 - Unit tests cover the UART↔TCP buffering layer and any non-trivial helper code; test suite runs in CI against the ESPHome component
 
 **Plans**: 3 (hardware bring-up, ESPHome component scaffolding, Wintex validation)
+
+---
+
+### Phase 1.5: MQTT Bring-up (Bridge Health to HA)
+**Goal**: Prove the Atom S3 can register with Home Assistant via MQTT auto-discovery by publishing three built-in device-health sensors. No Texecom protocol decode involved — this de-risks the MQTT/discovery path before Phase 3 commits to it for panel data, and exercises the broker/network/HA integration end-to-end without needing the panel bench.
+
+**Requirements**: REQ-010, REQ-005 (initial discovery scaffold)
+
+**Recommended Agents**:
+- `engineering-senior-developer` — ESPHome `mqtt:` block, sensor wiring, LWT/availability topic
+- `testing-api-tester` — MQTT discovery payload schema validation, retained-message behaviour
+- `testing-evidence-collector` — Home Assistant UI screenshots of the three entities updating live
+
+**Success Criteria**:
+- Device connects to the existing Mosquitto broker and stays online; LWT marks the device `offline` within 60s of disconnect
+- Three entities auto-appear in HA within 30s of first boot, with no manual YAML in HA:
+  - `binary_sensor.texecom_bridge_status` — connectivity (on/off, driven by LWT)
+  - `sensor.texecom_bridge_cpu_temperature` — ESP32-S3 internal temperature (°C)
+  - `sensor.texecom_bridge_wifi_signal` — WiFi RSSI (dBm)
+- Telemetry sensors update at sensible intervals (≤60s)
+- Survives a Mosquitto restart: entities go `unavailable`, then recover automatically when the broker returns
+- Survives a WiFi blip: device reconnects and entities recover without HA restart
+- Adds no new compile-time dependencies beyond ESPHome built-ins (no custom C++ for this slice)
+
+**Plans**: 1 (MQTT bring-up + HA validation)
 
 ---
 
@@ -128,8 +154,9 @@
 | Phase | Plans | Completed | Status |
 |-------|-------|-----------|--------|
 | 1. Serial-to-TCP Bridge | 3 | 1.5 | In progress (01-01 partial, 01-02 done, 01-03 pending hardware) |
+| 1.5. MQTT Bring-up | 1 | 1 | Executed — pending user hardware validation |
 | 2. Wintex Protocol Capture & Decode | 3 | 0 | Planned |
 | 3. MQTT + HA Auto-Discovery | 2 | 0 | Not started |
 | 4. Panel-Powered Hardware | 2 | 0 | Not started |
 | 5. Community Release Polish | 2 | 0 | Not started |
-| **Total** | **12** | **0** | — |
+| **Total** | **13** | **2.5** | — |

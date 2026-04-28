@@ -24,6 +24,7 @@ Primary: the project owner, for personal use with a Premier 24 installed at home
 - **REQ-007 — Level shifting (hardware)**: Proper bidirectional level shift between panel 5V TTL UART and Atom S3 3.3V logic
 - **REQ-008 — Panel-type abstraction**: Code factored behind a panel-model interface so switching to other Premier Elite models (48/88/168/640) is additive, not invasive
 - **REQ-009 — Community release**: README, wiring diagram, reproducible ESPHome YAML config, GitHub release tag
+- **REQ-010 — Bridge health telemetry**: Publish bridge online/offline status, CPU temperature, and WiFi signal strength to MQTT with HA auto-discovery, independent of any Texecom panel data — proves the MQTT/discovery integration end-to-end before Phase 3 layers panel data on top
 
 ### Out of Scope
 - Keypad emulation / replacement
@@ -53,6 +54,7 @@ Primary: the project owner, for personal use with a Premier 24 installed at home
 | Wintex exclusivity over MQTT | Simpler state machine — MQTT pauses while Wintex is connected | No dual-use concurrency to design around |
 | Unauthenticated LAN-only bridge | Same security posture as the panel's physical COM port; matches reference projects | No TLS / auth work in v1 |
 | USB power during Phases 1-3 | Defers hardware complexity until firmware is proven | Level shifting + 12V regulator bundled into Phase 4 |
+| MQTT bring-up split into Phase 1.5 (2026-04-28) | De-risks MQTT/HA discovery path early using built-in ESPHome sensors; doesn't need panel bench time | Phase 1.5 ships health telemetry; Phase 3 is now Wintex-data-only |
 | Execution mode: Guided | User's chosen default — pauses at key decision points | Legion stops for confirmation between waves |
 | Planning depth: Standard | User's chosen default | Balanced task breakdowns with explicit acceptance criteria |
 | Cost profile: Balanced | User's chosen default | Haiku/Sonnet for routine work, Opus for complex reasoning and review |
