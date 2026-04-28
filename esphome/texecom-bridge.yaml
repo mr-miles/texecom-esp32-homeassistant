@@ -67,19 +67,23 @@ logger:
   logs:
     uart: WARN
 
-# NOTE — components removed to keep the binary lean:
-#   * `web_server:` was here (Plan 02-01) to serve captured Wintex
-#     sessions for download. Capture files are still written to LittleFS
-#     by the texecom component; re-add web_server: when Phase 2's
-#     hardware-validation pass needs the HTTP download path, e.g.:
-#       web_server:
-#         port: 80
-#         version: 3
-#         local: false
-#   * `api:` (ESPHome Native API) was here. Dropped because HA
-#     integration goes via MQTT (REQ-005, Phase 1.5+). Re-add the api:
-#     block + api_encryption_key secret if you ever want HA's ESPHome
-#     integration to talk to this device directly.
+# Web dashboard for browser-based diagnostics:
+#   * Entity states + live updates
+#   * Logs tab — including the boot-time dump_config() (handy for
+#     confirming what configuration the device is actually running)
+#   * Phase-2 follow-up will add a /captures/ route here that lists
+#     and serves the on-device Wintex capture files
+# `local: false` keeps JS/CSS on a CDN so the binary stays small
+# (~30-50 KB saved over `local: true`).
+web_server:
+  port: 80
+  version: 3
+  local: false
+
+# NOTE — `api:` (ESPHome Native API) was deliberately removed. HA
+# integration goes via MQTT (REQ-005, Phase 1.5+). Re-add the api:
+# block + api_encryption_key secret if you ever want HA's ESPHome
+# integration to talk to this device directly.
 #
 # Phase 1.5 — MQTT bring-up.
 # This block ships ahead of any Texecom-decoded panel data so we can prove
