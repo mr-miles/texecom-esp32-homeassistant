@@ -29,6 +29,7 @@
 - **Phase 1.5 cleanup (2026-04-28)**: Stripped `api:` and `web_server:` from default install (HA integration via MQTT-only; web_server re-enables when Phase 2 needs capture downloads). Added `device_id` substitution (random 8-char hex) baked into mDNS hostname `texecom-bridge-${device_id}.local` and MQTT topic subtree to prevent multi-bridge collisions on shared LAN/broker. Added `mqtt_port` and `mqtt_base_topic` substitutions for tunable defaults.
 - **Phase 1.5 closed (2026-04-28)**: First end-to-end Texecom Bridge → Mosquitto → HA discovery success. 3 entities visible in HA (status/cpu_temp/wifi_signal). LWT verified (offline-on-disconnect within 60s). Broker-restart recovery verified. WiFi-blip recovery test skipped (no easy router-side MAC-block at site); coverage judged sufficient via the other reconnect-path tests. Validation runbook ticks recorded in 01.5-VALIDATION.md.
 - **Lesson learned (2026-04-28)**: Bring-up burned ~30 min because the chip was running stale unrelated firmware (F1p Ecodan code from a comparison experiment) and OTA upload couldn't reach it. VS Code ESPHome extension only offers compile + OTA, so initial recovery flashing required `esphome run --device COM3` from the CLI. Captured to memory.
+- **Phase 2 priority — Plan 02-01 fix-up first (2026-04-28)**: Plan 02-01 shipped the capture writer to LittleFS but never wired the HTTP download route the SUMMARY claimed. Before any other Phase 2 work, add a `/captures/` handler to `components/texecom/` that hooks into ESPHome's WebServerBase to provide directory listing + file streaming for the on-device `.bin` + `.txt` capture files. ~30-50 LOC C++. User wants this as the first thing in Phase 2 so the download UX exists before Plan 02-02's grammar/decoder work needs real captures.
 
 ## Hardware Setup Required Before Closing Phase 1 / Starting Phase 2
 1. Wire Atom S3 ↔ Premier 24 per `.planning/hardware/phase-1-wiring.md`
@@ -41,5 +42,6 @@
 
 ## Next Action
 - **Phase 1 close still pending hardware**: Plan 01-03 (Wintex validation) needs the bench wired up — see "Hardware Setup" below. Closing Plan 01-03 closes Phase 1.
-- **If panel hardware is ready**: `/legion:build` for Phase 1 Plan 01-03 (Wintex validation) → close Phase 1 → `/legion:build` for Phase 2 Plan 02-01 (capture infra).
+- **Phase 2 entry (queued)**: First task on resuming Phase 2 is the Plan 02-01 fix-up — add the `/captures/` HTTP route to the texecom component so the on-device captures are browser-downloadable. This was promised in Plan 02-01's SUMMARY but never built. User-requested priority before any Plan 02-02 grammar/decoder work.
+- **If panel hardware is ready**: `/legion:build` for Phase 1 Plan 01-03 (Wintex validation) → close Phase 1 → `/legion:build` for Phase 2 (Plan 02-01 fix-up first, then Plan 02-02).
 - **If panel hardware is not ready**: Phase 2 plans are written. Resume `/legion:build` whenever the bench is ready.
