@@ -15,16 +15,16 @@
 # editing the rest of the file. Substitutions are always strings; ESPHome
 # coerces ${mqtt_port} to an integer where the schema requires it.
 #
-# `device_id` is a random 8-char a-z0-9 identifier baked into:
+# `device_id` is a random 8-char hex identifier (0-9, a-f) baked into:
 #   * the mDNS hostname        (texecom-bridge-${device_id}.local)
 #   * the friendly name in HA  ("Texecom Bridge ${device_id}")
 #   * the MQTT topic subtree   (${mqtt_base_topic}/${device_id}/...)
 # Regenerate per-device when flashing a second bridge so neither mDNS
-# nor MQTT topics collide. Generate with:
-#     python -c "import secrets, string; print(''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8)))"
-# Lowercase only — ESPHome's name field rejects uppercase.
+# nor MQTT topics collide. Hex avoids l/1/I and o/0/O ambiguity. Generate
+# with:
+#     python -c "import secrets; print(secrets.token_hex(4))"
 substitutions:
-  device_id: "56eyl50l"
+  device_id: "2f7dc4b9"
   mqtt_port: "1883"
   mqtt_base_topic: "Texecom"
 
@@ -118,7 +118,7 @@ wifi:
   password: !secret wifi_password
   # First-boot captive portal fallback.
   ap:
-    ssid: "Texecom-Bridge Fallback"
+    ssid: "Texecom Premier Bridge"
     password: !secret ota_password
 
 captive_portal:
@@ -156,7 +156,7 @@ texecom:
 # sensor.texecom_bridge_wifi_signal).
 binary_sensor:
   - platform: template
-    name: "Texecom Bridge Status"
+    name: "Bridge Status"
     id: bridge_status
     device_class: connectivity
     # ESPHome's mqtt component automatically publishes the device's
@@ -169,11 +169,11 @@ binary_sensor:
 
 sensor:
   - platform: internal_temperature
-    name: "Texecom Bridge CPU Temperature"
+    name: "Bridge CPU Temperature"
     id: bridge_cpu_temp
     update_interval: 60s
 
   - platform: wifi_signal
-    name: "Texecom Bridge WiFi Signal"
+    name: "Bridge WiFi Signal"
     id: bridge_wifi_signal
     update_interval: 60s
