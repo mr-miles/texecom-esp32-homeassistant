@@ -16,7 +16,7 @@
 # coerces ${mqtt_port} to an integer where the schema requires it.
 #
 # `device_id` is a random 8-char a-z0-9 identifier baked into:
-#   * the mDNS hostname        (${device_id}.local)
+#   * the mDNS hostname        (texecom-bridge-${device_id}.local)
 #   * the friendly name in HA  ("Texecom Bridge ${device_id}")
 #   * the MQTT topic subtree   (${mqtt_base_topic}/${device_id}/...)
 # Regenerate per-device when flashing a second bridge so neither mDNS
@@ -29,7 +29,7 @@ substitutions:
   mqtt_base_topic: "Texecom"
 
 esphome:
-  name: ${device_id}
+  name: texecom-bridge-${device_id}
   friendly_name: "Texecom Bridge ${device_id}"
   # No third-party libraries needed — the texecom component uses
   # ESPHome's native `socket` API for TCP listening (see

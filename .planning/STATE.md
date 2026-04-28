@@ -31,7 +31,7 @@
 1. Wire Atom S3 ↔ Premier 24 per `.planning/hardware/phase-1-wiring.md`
 2. Create `esphome/secrets.yaml` from `secrets.yaml.example`
 3. Flash `esphome/texecom-bridge.yaml` via `esphome run esphome/texecom-bridge.yaml`
-4. Install Wintex on a LAN-connected Windows box; configure UDL connection to `<device_id>.local:10001` (the random 8-char id from the substitutions block at the top of `esphome/texecom-bridge.yaml`)
+4. Install Wintex on a LAN-connected Windows box; configure UDL connection to `texecom-bridge-<device_id>.local:10001` (the random 8-char id from the substitutions block at the top of `esphome/texecom-bridge.yaml`)
 5. Run a Wintex session to close Plan 01-03 (Phase 1 done)
 6. Build Phase 2 Plan 02-01 (adds capture infra), reflash, capture ≥3 Wintex sessions covering: cold-start full Receive, single-setting Send + verify, arm/disarm + tamper events
 7. Drop captured `.bin` files under `tools/captures/` so Plan 02-02 can decode them
