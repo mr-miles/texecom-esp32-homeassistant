@@ -12,11 +12,13 @@ Primary command (from the repo root):
 esphome run esphome/texecom-bridge.yaml
 ```
 
-First-time setup: copy `esphome/secrets.yaml.example` to `esphome/secrets.yaml` and fill in your Wi-Fi, OTA, and API encryption secrets. The real `secrets.yaml` is `.gitignore`'d.
+First-time setup: copy `esphome/secrets.yaml.example` to `esphome/secrets.yaml` and fill in your Wi-Fi, OTA, and MQTT broker secrets. The real `secrets.yaml` is `.gitignore`'d.
 
 Wiring (locked in Plan 01-01): GPIO5 = TX (Atom S3 -> panel), GPIO6 = RX (panel -> Atom S3), 19200 8N2. See `.planning/hardware/phase-1-wiring.md` for the full pinout and protection-resistor decisions.
 
-Once flashed, point Wintex (or any TCP client) at `texecom-bridge.local:10001`. Only one client is allowed at a time; a second connection is rejected cleanly while the first session is preserved.
+Per-device id: `esphome/texecom-bridge.yaml` carries a random 8-char `device_id` substitution at the top. It's used as the mDNS hostname, the HA friendly-name suffix, and the MQTT topic subtree, so two bridges on the same LAN/broker don't collide. Regenerate before flashing a second device — the comment above the substitution shows the one-line Python command.
+
+Once flashed, point Wintex (or any TCP client) at `<device_id>.local:10001` (the value from your YAML). Only one client is allowed at a time; a second connection is rejected cleanly while the first session is preserved.
 
 ## Run the host-side test suite
 

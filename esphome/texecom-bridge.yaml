@@ -14,13 +14,23 @@
 # to change the MQTT broker port or the root topic namespace without
 # editing the rest of the file. Substitutions are always strings; ESPHome
 # coerces ${mqtt_port} to an integer where the schema requires it.
+#
+# `device_id` is a random 8-char a-z0-9 identifier baked into:
+#   * the mDNS hostname        (${device_id}.local)
+#   * the friendly name in HA  ("Texecom Bridge ${device_id}")
+#   * the MQTT topic subtree   (${mqtt_base_topic}/${device_id}/...)
+# Regenerate per-device when flashing a second bridge so neither mDNS
+# nor MQTT topics collide. Generate with:
+#     python -c "import secrets, string; print(''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8)))"
+# Lowercase only — ESPHome's name field rejects uppercase.
 substitutions:
+  device_id: "56eyl50l"
   mqtt_port: "1883"
   mqtt_base_topic: "Texecom"
 
 esphome:
-  name: texecom-bridge
-  friendly_name: Texecom Bridge
+  name: ${device_id}
+  friendly_name: "Texecom Bridge ${device_id}"
   # No third-party libraries needed — the texecom component uses
   # ESPHome's native `socket` API for TCP listening (see
   # components/texecom/texecom.cpp). The previous TCP-library
@@ -86,13 +96,13 @@ mqtt:
   # publishes (and the prefix HA's discovery messages reference). Default
   # "Texecom" — overridable via the substitution at the top of this file.
   # Discovery is enabled by default — entities auto-appear in HA.
-  topic_prefix: ${mqtt_base_topic}
+  topic_prefix: ${mqtt_base_topic}/${device_id}
   birth_message:
-    topic: ${mqtt_base_topic}/status
+    topic: ${mqtt_base_topic}/${device_id}/status
     payload: online
     retain: true
   will_message:
-    topic: ${mqtt_base_topic}/status
+    topic: ${mqtt_base_topic}/${device_id}/status
     payload: offline
     retain: true
   # Phase 3 will add Texecom-decoded sensors here. Phase 1.5 only carries
