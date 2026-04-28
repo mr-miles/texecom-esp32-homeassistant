@@ -3,7 +3,7 @@
 ## Phases
 
 - [ ] **Phase 1** — Serial-to-TCP Bridge (Wintex-over-LAN)
-- [ ] **Phase 1.5** — MQTT Bring-up (Bridge Health to HA)
+- [x] **Phase 1.5** — MQTT Bring-up (Bridge Health to HA)
 - [ ] **Phase 2** — Wintex Protocol Capture & Decode
 - [ ] **Phase 3** — MQTT + Home Assistant Auto-Discovery
 - [ ] **Phase 4** — Panel-Powered Hardware
@@ -154,9 +154,9 @@
 | Phase | Plans | Completed | Status |
 |-------|-------|-----------|--------|
 | 1. Serial-to-TCP Bridge | 3 | 1.5 | In progress (01-01 partial, 01-02 done, 01-03 pending hardware) |
-| 1.5. MQTT Bring-up | 1 | 1 | Executed — pending user hardware validation |
+| 1.5. MQTT Bring-up | 1 | 1 | Complete (closed 2026-04-28; WiFi-blip test skipped, all other criteria ticked) |
 | 2. Wintex Protocol Capture & Decode | 3 | 0 | Planned |
 | 3. MQTT + HA Auto-Discovery | 2 | 0 | Not started |
 | 4. Panel-Powered Hardware | 2 | 0 | Not started |
 | 5. Community Release Polish | 2 | 0 | Not started |
-| **Total** | **13** | **2.5** | — |
+| **Total** | **13** | **3.5** | — |

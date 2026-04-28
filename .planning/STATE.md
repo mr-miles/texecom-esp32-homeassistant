@@ -1,13 +1,13 @@
 # Project State
 
 ## Current Position
-- **Phase**: 1 in progress, Phase 1.5 executed (pending user hardware validation), Phase 2 planned
-- **Status**: Phase 1 — code shipped + CI green; Plans 01-01 (bench) and 01-03 (Wintex validation) await user hardware time. Phase 1.5 — Plan 01.5-01 executed and committed; `esphome config` passes; phase-close awaits user running `01.5-VALIDATION.md` against the live broker + HA. Phase 2 — 3 plans across 3 sequential waves, second wave hardware-gated on user-supplied capture sessions.
-- **Last Activity**: Phase 1.5 Plan 01.5-01 executed — MQTT block + 3 health sensors landed in `esphome/texecom-bridge.yaml` (2026-04-28)
+- **Phase**: 1 in progress, **Phase 1.5 closed**, Phase 2 planned
+- **Status**: Phase 1 — code shipped + CI green; Plans 01-01 (bench) and 01-03 (Wintex validation) await user hardware time. Phase 1.5 — closed 2026-04-28; 8/9 phase-close criteria ticked against real hardware (3 entities live in HA, LWT works, Mosquitto-restart recovery works); WiFi-blip test skipped (no easy router-side MAC-block at site) but the reconnect path is exercised by the LWT + broker-restart paths. Phase 2 — 3 plans across 3 sequential waves, second wave hardware-gated on user-supplied capture sessions.
+- **Last Activity**: Phase 1.5 closed — first end-to-end Texecom Bridge → Mosquitto → HA discovery success (2026-04-28)
 
 ## Progress
 ```
-[███░░░░░░░░░░░░░░░░░] 19% — 2.5/13 plans complete
+[████░░░░░░░░░░░░░░░░] 27% — 3.5/13 plans complete
 ```
 
 ## Recent Decisions
@@ -26,6 +26,9 @@
 - **Phase 1.5 inserted (2026-04-28)**: New MQTT bring-up slice between Phase 1 and Phase 2. Publishes 3 ESPHome built-in sensors (bridge status via LWT, CPU temperature, WiFi signal dBm) to existing Mosquitto with HA discovery. Independent of panel bench — can run concurrently with Phase 1 hardware bring-up. Plan files target `.planning/phases/01.5-mqtt-bringup/`. Adds REQ-010.
 - **Phase 1.5 planning (2026-04-28)**: Single plan, single wave, single agent (engineering-senior-developer). 3 tasks: add `mqtt:` block + secrets entries; declare 3 sensors; validate config + write `01.5-VALIDATION.md` runbook. No C++ changes; pure ESPHome YAML using built-in `internal_temperature` + `wifi_signal` + a connectivity binary_sensor. No unit tests required (no non-trivial code path); validation runbook substitutes for automation since proof points need a real broker + HA.
 - **Phase 1.5 executed (2026-04-28)**: Plan 01.5-01 complete. `esphome config esphome/texecom-bridge.yaml` exits 0. Files modified: `esphome/texecom-bridge.yaml`, `esphome/secrets.yaml.example`, plus new `01.5-VALIDATION.md` and `01.5-01-SUMMARY.md`. Side-effect: ESPHome auto-generated `esphome/.gitignore` (harmless, redundant with root gitignore). Phase-close awaits the user's manual validation pass against live Mosquitto + HA.
+- **Phase 1.5 cleanup (2026-04-28)**: Stripped `api:` and `web_server:` from default install (HA integration via MQTT-only; web_server re-enables when Phase 2 needs capture downloads). Added `device_id` substitution (random 8-char hex) baked into mDNS hostname `texecom-bridge-${device_id}.local` and MQTT topic subtree to prevent multi-bridge collisions on shared LAN/broker. Added `mqtt_port` and `mqtt_base_topic` substitutions for tunable defaults.
+- **Phase 1.5 closed (2026-04-28)**: First end-to-end Texecom Bridge → Mosquitto → HA discovery success. 3 entities visible in HA (status/cpu_temp/wifi_signal). LWT verified (offline-on-disconnect within 60s). Broker-restart recovery verified. WiFi-blip recovery test skipped (no easy router-side MAC-block at site); coverage judged sufficient via the other reconnect-path tests. Validation runbook ticks recorded in 01.5-VALIDATION.md.
+- **Lesson learned (2026-04-28)**: Bring-up burned ~30 min because the chip was running stale unrelated firmware (F1p Ecodan code from a comparison experiment) and OTA upload couldn't reach it. VS Code ESPHome extension only offers compile + OTA, so initial recovery flashing required `esphome run --device COM3` from the CLI. Captured to memory.
 
 ## Hardware Setup Required Before Closing Phase 1 / Starting Phase 2
 1. Wire Atom S3 ↔ Premier 24 per `.planning/hardware/phase-1-wiring.md`
@@ -37,7 +40,6 @@
 7. Drop captured `.bin` files under `tools/captures/` so Plan 02-02 can decode them
 
 ## Next Action
-- **Phase 1.5 close (user, no agent)**: Update `esphome/secrets.yaml` with three new keys (`mqtt_broker_host`, `mqtt_broker_username`, `mqtt_broker_password`) pointing at the existing Mosquitto. Then follow `.planning/phases/01.5-mqtt-bringup/01.5-VALIDATION.md` step by step: flash → confirm 3 entities in HA → LWT test → broker-restart test → WiFi-blip test. Tick the phase-close checklist; that's the artefact that closes Phase 1.5.
-- **Optional**: `/legion:review` to run a review pass over the Phase 1.5 code+plan deliverables before flashing.
+- **Phase 1 close still pending hardware**: Plan 01-03 (Wintex validation) needs the bench wired up — see "Hardware Setup" below. Closing Plan 01-03 closes Phase 1.
 - **If panel hardware is ready**: `/legion:build` for Phase 1 Plan 01-03 (Wintex validation) → close Phase 1 → `/legion:build` for Phase 2 Plan 02-01 (capture infra).
 - **If panel hardware is not ready**: Phase 2 plans are written. Resume `/legion:build` whenever the bench is ready.

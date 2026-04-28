@@ -12,7 +12,7 @@ Primary: the project owner, for personal use with a Premier 24 installed at home
 ## Requirements
 
 ### Validated
-(None yet — ship to validate)
+- **REQ-010 — Bridge health telemetry** (closed 2026-04-28 with Phase 1.5): Three device-health entities (status, CPU temperature, WiFi signal) auto-discovered by HA via MQTT. End-to-end MQTT/discovery integration proven before Phase 3 layers panel data on top.
 
 ### Active
 - **REQ-001 — Serial-to-TCP bridge**: ESP32 listens on TCP port 10001 and passes bytes transparently to/from the panel's COM header UART
@@ -24,7 +24,8 @@ Primary: the project owner, for personal use with a Premier 24 installed at home
 - **REQ-007 — Level shifting (hardware)**: Proper bidirectional level shift between panel 5V TTL UART and Atom S3 3.3V logic
 - **REQ-008 — Panel-type abstraction**: Code factored behind a panel-model interface so switching to other Premier Elite models (48/88/168/640) is additive, not invasive
 - **REQ-009 — Community release**: README, wiring diagram, reproducible ESPHome YAML config, GitHub release tag
-- **REQ-010 — Bridge health telemetry**: Publish bridge online/offline status, CPU temperature, and WiFi signal strength to MQTT with HA auto-discovery, independent of any Texecom panel data — proves the MQTT/discovery integration end-to-end before Phase 3 layers panel data on top
+<!-- REQ-010 moved to Validated above on 2026-04-28 -->
+
 
 ### Out of Scope
 - Keypad emulation / replacement
