@@ -26,6 +26,13 @@ esphome:
   # components/texecom/texecom.cpp). The previous TCP-library
   # dependency was removed because the upstream forks kept breaking
   # across Arduino-ESP32 revisions.
+  #
+  # Suppress Arduino-ESP32 core debug logging. Smaller binary, less
+  # serial chatter — ESPHome's own logger: still emits at the level
+  # configured below, so visibility into our code is unaffected.
+  platformio_options:
+    build_flags:
+      - -DCORE_DEBUG_LEVEL=0
 
 esp32:
   board: m5stack-atoms3
@@ -50,26 +57,20 @@ logger:
   logs:
     uart: WARN
 
-# Plan 02-01: serve captured Wintex sessions over HTTP for download.
-# LAN-only deployment — auth deliberately disabled (matches the security
-# posture of the unauthenticated TCP bridge on port 10001).
+# NOTE — components removed to keep the binary lean:
+#   * `web_server:` was here (Plan 02-01) to serve captured Wintex
+#     sessions for download. Capture files are still written to LittleFS
+#     by the texecom component; re-add web_server: when Phase 2's
+#     hardware-validation pass needs the HTTP download path, e.g.:
+#       web_server:
+#         port: 80
+#         version: 3
+#         local: false
+#   * `api:` (ESPHome Native API) was here. Dropped because HA
+#     integration goes via MQTT (REQ-005, Phase 1.5+). Re-add the api:
+#     block + api_encryption_key secret if you ever want HA's ESPHome
+#     integration to talk to this device directly.
 #
-# After a Wintex session, browse to:
-#   http://<device-ip>/                      — landing page
-#   http://<device-ip>/file?file=/captures/  — directory listing of captures
-#   http://<device-ip>/file?file=/captures/wintex-XXXX-001.bin  — download
-#   http://<device-ip>/file?file=/captures/wintex-XXXX-001.txt  — hex dump
-# (web_server v3 also exposes a built-in /local/ tree if compiled with
-# include_internal — fall back to /file?file= for portability.)
-web_server:
-  port: 80
-  version: 3
-  local: false
-
-api:
-  encryption:
-    key: !secret api_encryption_key
-
 # Phase 1.5 — MQTT bring-up.
 # This block ships ahead of any Texecom-decoded panel data so we can prove
 # the broker/network/HA-discovery integration end-to-end using only ESPHome
