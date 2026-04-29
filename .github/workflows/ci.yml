@@ -44,14 +44,17 @@ jobs:
 
       - name: Generate CI secrets
         # Real deployments use esphome/secrets.yaml (gitignored). CI compiles
-        # against a dummy file with a valid-shape api_encryption_key so the
-        # YAML resolves but the binary is unusable as a real device.
+        # against a dummy file with placeholder values so the YAML resolves
+        # but the resulting binary is unusable as a real device. Keep this
+        # fixture in lockstep with esphome/secrets.yaml.example.
         run: |
           cat > esphome/secrets.yaml <<'EOF'
           wifi_ssid: "ci-dummy-ssid"
           wifi_password: "ci-dummy-wifi-password"
           ota_password: "ci-dummy-ota-password"
-          api_encryption_key: "kDBeOpf+ZAMPQX1IqvLqGMmdBjxJZBEsr3UaFYU+vzg="
+          mqtt_broker_host: "ci-dummy-broker.invalid"
+          mqtt_broker_username: "ci-dummy-user"
+          mqtt_broker_password: "ci-dummy-broker-password"
           EOF
 
       - name: Cache PlatformIO
