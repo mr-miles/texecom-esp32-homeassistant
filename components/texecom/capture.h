@@ -74,6 +74,7 @@
 #include <cstring>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace esphome {
 namespace texecom {
@@ -193,6 +194,14 @@ class Capture {
   uint32_t bytes_written() const { return bytes_written_total_; }
   bool is_session_active() const { return session_active_; }
 
+  // Filenames (basename only — no path prefix) of capture files this
+  // process knows about. Maintained as files are opened, NOT by
+  // iterating LittleFS — arduino-esp32's `LittleFS.open("/")` returns
+  // an invalid handle on some partitions, so directory iteration is
+  // unreliable. The list is lost across reboots; for this project's
+  // capture-then-immediately-download workflow that's acceptable.
+  const std::vector<std::string> &known_captures() const { return known_captures_; }
+
   // True when the caller's mode + current session state would actually
   // persist a `record()` call. Lets Texecom skip the per-byte loop on
   // hot paths when capture is disabled.
@@ -232,6 +241,12 @@ class Capture {
   uint32_t bytes_written_total_{0};
   uint32_t current_file_bytes_{0};
   uint32_t warn_throttle_{0};
+
+  // Basenames of capture files we've opened in this boot, maintained so
+  // the HTTP listing handler doesn't need to iterate LittleFS directly
+  // (which is unreliable on some arduino-esp32 partitions — see
+  // known_captures() comment).
+  std::vector<std::string> known_captures_{};
 
   // Per-event ring. We store the variable-length payload inline up to a
   // bounded size; larger pushes get split or dropped (Wintex frames stay

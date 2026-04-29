@@ -367,6 +367,21 @@ void Capture::open_new_file_() {
 
   current_file_bytes_ = sizeof(hdr);
   ESP_LOGI(TAG, "capture: opened %s", current_path_bin_.c_str());
+
+  // Track this filename so the HTTP listing can show it without having
+  // to iterate LittleFS (which fails on this device's root path).
+  // Store basename only — strip any leading slash + root_path_ prefix.
+  {
+    std::string basename = current_path_bin_;
+    auto slash = basename.find_last_of('/');
+    if (slash != std::string::npos) basename = basename.substr(slash + 1);
+    known_captures_.push_back(basename);
+    // Also remember the .txt sidecar so it shows up alongside.
+    std::string txt_base = current_path_txt_;
+    auto txt_slash = txt_base.find_last_of('/');
+    if (txt_slash != std::string::npos) txt_base = txt_base.substr(txt_slash + 1);
+    known_captures_.push_back(txt_base);
+  }
 }
 
 void Capture::close_current_file_() {

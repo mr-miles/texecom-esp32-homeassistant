@@ -159,38 +159,28 @@ class CaptureHttpHandler : public AsyncWebHandler {
     const std::string iter_path = root.empty() ? "/" : root;
     body += "<p>Root: <code>" + html_escape_(iter_path) + "</code></p>";
 
-    File dir = LittleFS.open(iter_path.c_str());
-    if (!dir) {
-      body += "<p><em>Capture storage not available — check device log.</em></p>";
-      body += "</body></html>";
-      request->send(200, "text/html; charset=utf-8", body.c_str());
-      return;
-    }
-    // Note: we deliberately don't gate on dir.isDirectory() here —
-    // arduino-esp32's LittleFS reports false for the root path "/"
-    // even when openNextFile() iterates correctly. If iteration yields
-    // nothing the "no captures yet" branch below fires, which is the
-    // right UX whether the path is empty or genuinely not a directory.
-
+    // Iterate via the in-memory known_captures list rather than opening
+    // the LittleFS root — the latter is unreliable on this hardware
+    // (LittleFS.open("/") returns an invalid handle on some
+    // arduino-esp32 partitions). Filenames the writer has opened in
+    // this boot are recorded; we stat them via direct file open to
+    // get current size and mtime.
     struct Entry {
       std::string name;
       std::size_t size;
       time_t mtime;
     };
     std::vector<Entry> entries;
-    File f = dir.openNextFile();
-    while (f) {
-      std::string fname = f.name();
-      // Some LittleFS implementations return the full path; reduce to
-      // basename so the safety check + relative href work.
-      auto slash = fname.find_last_of('/');
-      if (slash != std::string::npos) fname = fname.substr(slash + 1);
-      if (!f.isDirectory() && is_safe_capture_filename(fname)) {
-        entries.push_back({fname, (std::size_t) f.size(), f.getLastWrite()});
-      }
-      f = dir.openNextFile();
+    for (const std::string &fname : capture_->known_captures()) {
+      if (!is_safe_capture_filename(fname)) continue;
+      std::string full = iter_path;
+      if (full.empty() || full.back() != '/') full += '/';
+      full += fname;
+      File f = LittleFS.open(full.c_str(), "r");
+      if (!f) continue;
+      entries.push_back({fname, (std::size_t) f.size(), f.getLastWrite()});
+      f.close();
     }
-    dir.close();
 
     std::sort(entries.begin(), entries.end(),
               [](const Entry &a, const Entry &b) { return a.name < b.name; });
