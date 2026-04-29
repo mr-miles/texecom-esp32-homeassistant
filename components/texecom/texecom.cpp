@@ -9,6 +9,7 @@
 #include "esphome/components/socket/headers.h"
 #include "esphome/components/socket/socket.h"
 
+#include "capture_http.h"
 #include "panel_model_premier24.h"
 
 namespace esphome {
@@ -69,6 +70,13 @@ void Texecom::setup() {
     capture_.set_panel_name(model_->name());
   }
   capture_.setup();
+
+  // Wire the HTTP route that exposes /captures/ for download. The
+  // function is a no-op on host builds and on devices without a
+  // web_server (e.g. CI), and idempotent if setup() is invoked twice.
+#if defined(USE_ARDUINO) && defined(USE_NETWORK)
+  register_capture_http_handler(&capture_, capture_.root_path());
+#endif
 
   // Create the TCP listener. `socket_listen()` returns a ListenSocket,
   // which on the LWIP_TCP backend is a distinct type from Socket (the
@@ -146,6 +154,7 @@ void Texecom::dump_config() {
   ESP_LOGCONFIG(TAG, "  Capture mode:  %s", capture_.mode_str());
   ESP_LOGCONFIG(TAG, "  Capture max:   %u bytes/file", (unsigned) capture_.max_file_bytes());
   ESP_LOGCONFIG(TAG, "  Capture root:  %s", capture_.root_path().c_str());
+  ESP_LOGCONFIG(TAG, "  Capture URL:   http://<device>%s/", capture_.root_path().c_str());
   ESP_LOGCONFIG(TAG, "  Capture drops: %u events lost", (unsigned) capture_.drops());
 }
 

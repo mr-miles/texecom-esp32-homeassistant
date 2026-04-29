@@ -5,6 +5,8 @@
 #   * SessionState             -- tests/test_session_state.cpp
 #   * PanelModel / Premier 24  -- tests/test_panel_model.cpp
 #   * Capture / TXCP format    -- tests/test_capture.cpp  (Plan 02-01)
+#   * Capture HTTP path safety -- tests/test_capture_http_paths.cpp
+#                                                   (Plan 02-01 fix-up)
 #
 # The ESPHome framework headers (esphome/core/*) are NOT pulled in. Only
 # the pure C++ headers under components/texecom/ are compiled here.
@@ -46,8 +48,10 @@ add_executable(texecom_tests
   test_session_state.cpp
   test_panel_model.cpp
   test_capture.cpp
+  test_capture_http_paths.cpp
   ${TEXECOM_COMPONENT_DIR}/panel_model_premier24.cpp
   ${TEXECOM_COMPONENT_DIR}/capture.cpp
+  ${TEXECOM_COMPONENT_DIR}/capture_http.cpp
 )
 
 target_include_directories(texecom_tests PRIVATE

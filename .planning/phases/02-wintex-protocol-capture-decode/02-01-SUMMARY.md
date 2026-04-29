@@ -177,9 +177,9 @@ texecom component itself (deferred — current path works).
 >      Status, arm an area at the keypad and disarm it while Wintex is
 >      watching, disconnect.
 > 4. Browse to
->    `http://<device-ip>/file?file=/captures/` to see the listing.
->    Each session produces one `wintex-*.bin` (binary) and matching
->    `wintex-*.txt` (xxd-style dump).
+>    `http://<device-ip>/captures/` to see the listing (route added by
+>    the Plan 02-01 fix-up below). Each session produces one
+>    `wintex-*.bin` (binary) and matching `wintex-*.txt` (xxd-style dump).
 > 5. Download all `.bin` files and drop them under `tools/captures/`
 >    in this repo (create the dir if it doesn't exist). Commit them on
 >    a feature branch.
@@ -208,3 +208,126 @@ texecom component itself (deferred — current path works).
   user must manually `curl -X DELETE` (web_server v3 supports it) or
   re-flash to clear. Acceptable for Plan 02-01 — revisit if storage
   becomes a problem.
+
+---
+
+## Plan 02-01 fix-up (HTTP /captures/ route) — 2026-04-29
+
+### Why the fix-up was needed
+
+The original 02-01 SUMMARY (above) claimed users could browse to
+`http://<device>/file?file=/captures/wintex-XXXX-001.bin` to download
+captures via ESPHome's stock `web_server` v3. That URL pattern does not
+exist — `web_server` v3 has no arbitrary-LittleFS-path endpoint. The
+LittleFS writer landed correctly, but its only "exposure" was via SSH /
+serial-console / re-flash inspection of the raw flash. Plan 02-02 needs
+*real* HTTP downloads.
+
+### Approach: custom AsyncWebHandler on web_server_base
+
+The fall-back the original plan flagged ("a small custom HTTP route
+inside the texecom component") is now built. Reasoning:
+
+- ESPHome 2026.4 on ESP32 routes all `web_server`-family components
+  through `web_server_idf` (a thin wrapper over esp-idf's `httpd_*`
+  API). The `WebServerBase` singleton (`global_web_server_base`) accepts
+  custom `AsyncWebHandler` registrations alongside the dashboard/OTA
+  handlers — this is the documented hook ESPHome exposes for external
+  components, and the same hook `captive_portal` uses internally.
+- Trying to lean on a third-party "filesystem browser" component would
+  add a build-flag dependency we don't control. Hand-rolling ~250 LoC
+  keeps the surface area small, avoids a new git submodule, and lets us
+  enforce the path-safety rules ourselves.
+- File contents are streamed via `httpd_resp_send_chunk()` in 1 KB
+  chunks, so a full 256 KB capture never lands in heap at once.
+
+### New files
+
+- `components/texecom/capture_http.h` — public surface: forward-declares
+  `Capture`, exposes the pure `is_safe_capture_filename(name)` validator
+  (host-testable, security-critical), and declares the on-device
+  registration hook gated behind `USE_ARDUINO && USE_NETWORK`.
+- `components/texecom/capture_http.cpp` — defines `is_safe_capture_filename`
+  unconditionally, plus the `CaptureHttpHandler` AsyncWebHandler subclass
+  and `register_capture_http_handler()` under the same gate.
+  Pulls `esphome/core/defines.h` via `__has_include` so the gates
+  evaluate consistently in this translation unit.
+- `tests/test_capture_http_paths.cpp` — 6 Catch2 TEST_CASEs covering the
+  validator (plain pass / traversal / separators / control bytes /
+  empty-and-oversize / extension whitelist).
+
+### Files modified
+
+- `components/texecom/texecom.cpp` — `Texecom::setup()` now calls
+  `register_capture_http_handler(&capture_, capture_.root_path())`
+  after `capture_.setup()` (gated). `dump_config()` logs a "Capture URL"
+  line so the user can see the listing URL on boot.
+- `tests/CMakeLists.txt` — adds `test_capture_http_paths.cpp` and
+  `capture_http.cpp` to the host-test target.
+
+### URL pattern users hit
+
+```
+http://<device-ip>/captures/                     # HTML directory listing
+http://<device-ip>/captures/wintex-XXXX-001.bin  # binary download
+http://<device-ip>/captures/wintex-XXXX-001.txt  # hex dump (inline)
+```
+
+The mDNS hostname works the same way:
+`http://texecom-bridge-<id>.local/captures/`.
+
+`GET /captures` (no trailing slash) returns a 302 redirect to
+`/captures/` so relative download links resolve. `.bin` is sent with
+`Content-Type: application/octet-stream` and
+`Content-Disposition: attachment` (browser prompts to save). `.txt` is
+sent `text/plain; charset=utf-8` with `Content-Disposition: inline` so
+the hex dump renders in-tab.
+
+### Path safety guarantees
+
+`is_safe_capture_filename(name)` enforces:
+
+- Non-empty, length <= 96 chars (matches the snprintf bound in
+  `capture.cpp::open_new_file_()`).
+- No leading `.` (rejects `.`, `..`, dotfiles).
+- No `/`, `\\`, `:`, NUL, or any byte < 0x20 / == 0x7F.
+- Extension must be `.bin` or `.txt` (case-insensitive).
+
+The handler validates the URL tail via this function before *any*
+LittleFS lookup, and the directory listing also runs every entry it
+finds through the same validator before linking it. Both rules are
+locked by `tests/test_capture_http_paths.cpp`.
+
+### Validation results
+
+| Command | Status |
+|---------|--------|
+| `esphome config esphome/texecom-bridge.yaml` | exit 0 — "Configuration is valid!" |
+| `esphome compile esphome/texecom-bridge.yaml` | exit 0 — firmware.elf linked, firmware.factory.bin produced; one iteration to fix a `USE_NETWORK` gate (defines.h not transitively included) |
+| Host C++ tests (cmake/ctest) | NOT RUN locally — Windows host has no cmake/g++/clang/MSVC on PATH (same constraint as the original 02-01 work). CI workflow `host-tests` exercises them on push. |
+
+### Live-verification gaps
+
+These cannot be proved without OTA-flashing the device + actually
+running a Wintex session that produces capture files:
+
+- The directory listing renders correctly with real `wintex-*.bin`/
+  `.txt` files in `/captures/`.
+- `.bin` downloads as `application/octet-stream` and the browser
+  prompts to save (not preview).
+- `.txt` renders inline as `text/plain` (not download-prompted).
+- File-streaming via `httpd_resp_send_chunk` keeps memory bounded at
+  the 1 KB buffer rather than mallocing the full capture.
+- `Capture URL: http://<device>/captures/` line appears in
+  `dump_config` after boot.
+- Path-traversal attempts (e.g. `curl http://<dev>/captures/../etc/passwd`)
+  return 404, not the file. (Path-safety is unit-tested host-side, but
+  the route plumbing itself is integration-only.)
+
+### Next-step note
+
+After flash, browse to `http://texecom-bridge-2f7dc4b9.local/captures/`
+and confirm the listing renders, then click a `.bin` link to verify the
+download prompt. The user-instruction block above for collecting
+captures stays valid — only the download URL changes from the broken
+`/file?file=/captures/...` pattern to the real `/captures/<name>` route.
