@@ -228,10 +228,16 @@ void Capture::setup() {
     ESP_LOGE(TAG, "LittleFS mount failed; capture disabled");
     return;
   }
-  // Ensure root_path_ exists. LittleFS is happy to create files in
-  // arbitrary paths but mkdir is required for some configurations.
+  // Ensure root_path_ exists. arduino-esp32's LittleFS won't create
+  // intermediate directories on file write, and `LittleFS.exists()`
+  // doesn't reliably report empty-directory state on a freshly-formatted
+  // FS — so call mkdir unconditionally (it's a no-op if the dir already
+  // exists) and verify by re-checking.
+  LittleFS.mkdir(root_path_.c_str());
   if (!LittleFS.exists(root_path_.c_str())) {
-    LittleFS.mkdir(root_path_.c_str());
+    ESP_LOGW(TAG, "Capture: mkdir(%s) appeared to silently fail; "
+                  "open_new_file_() will retry on session start",
+             root_path_.c_str());
   }
   fs_ready_ = true;
   ESP_LOGI(TAG, "Capture ready: root=%s mode=%s max=%u",
@@ -288,13 +294,29 @@ void Capture::open_new_file_() {
   uint8_t hdr[kCaptureHeaderSize];
   serialize_header(h, hdr);
 
+  // Defensive mkdir on every session start — works around an edge case
+  // where setup()'s mkdir silently fails on a freshly-formatted FS,
+  // leaving subsequent file opens to fail. Idempotent if the dir
+  // already exists.
+  LittleFS.mkdir(root_path_.c_str());
+
   File f = LittleFS.open(current_path_bin_.c_str(), "w");
-  if (f) {
-    f.write(hdr, sizeof(hdr));
-    f.close();
-  } else {
-    ESP_LOGW(TAG, "capture: failed to open %s", current_path_bin_.c_str());
+  if (!f) {
+    // First open failed. Most likely cause: the parent directory wasn't
+    // really created. Try mkdir + reopen one more time before giving up.
+    LittleFS.mkdir(root_path_.c_str());
+    f = LittleFS.open(current_path_bin_.c_str(), "w");
   }
+  if (!f) {
+    ESP_LOGW(TAG, "capture: failed to open %s — capture for this session will be lost",
+             current_path_bin_.c_str());
+    current_path_bin_.clear();
+    current_path_txt_.clear();
+    current_file_bytes_ = 0;
+    return;
+  }
+  f.write(hdr, sizeof(hdr));
+  f.close();
 
   File t = LittleFS.open(current_path_txt_.c_str(), "w");
   if (t) {
@@ -305,6 +327,9 @@ void Capture::open_new_file_() {
                      (unsigned) baud_rate_, (unsigned long) h.start_unix_s);
     if (n > 0) t.write(reinterpret_cast<const uint8_t *>(banner), n);
     t.close();
+  } else {
+    ESP_LOGW(TAG, "capture: failed to open sidecar %s",
+             current_path_txt_.c_str());
   }
 
   current_file_bytes_ = sizeof(hdr);
