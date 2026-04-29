@@ -30,6 +30,7 @@
 - **Phase 1.5 closed (2026-04-28)**: First end-to-end Texecom Bridge → Mosquitto → HA discovery success. 3 entities visible in HA (status/cpu_temp/wifi_signal). LWT verified (offline-on-disconnect within 60s). Broker-restart recovery verified. WiFi-blip recovery test skipped (no easy router-side MAC-block at site); coverage judged sufficient via the other reconnect-path tests. Validation runbook ticks recorded in 01.5-VALIDATION.md.
 - **Lesson learned (2026-04-28)**: Bring-up burned ~30 min because the chip was running stale unrelated firmware (F1p Ecodan code from a comparison experiment) and OTA upload couldn't reach it. VS Code ESPHome extension only offers compile + OTA, so initial recovery flashing required `esphome run --device COM3` from the CLI. Captured to memory.
 - **Phase 2 priority — Plan 02-01 fix-up first (2026-04-28)**: Plan 02-01 shipped the capture writer to LittleFS but never wired the HTTP download route the SUMMARY claimed. Before any other Phase 2 work, add a `/captures/` handler to `components/texecom/` that hooks into ESPHome's WebServerBase to provide directory listing + file streaming for the on-device `.bin` + `.txt` capture files. ~30-50 LOC C++. User wants this as the first thing in Phase 2 so the download UX exists before Plan 02-02's grammar/decoder work needs real captures.
+- **Plan 02-01 fix-up shipped (2026-04-29)**: New `components/texecom/capture_http.{h,cpp}` (~370 LOC including HTML listing + path validator + chunked streaming via `httpd_resp_send_chunk`). Path safety via host-testable `is_safe_capture_filename()` with extension whitelist (`.bin`/`.txt`); 6 Catch2 cases in `tests/test_capture_http_paths.cpp`. `esphome compile` clean. Live verification (HTML listing, download prompts, traversal-blocked-over-the-wire) still pending OTA + a real Wintex capture session at the bench. Plans 02-02 + 02-03 remain hardware-gated.
 
 ## Hardware Setup Required Before Closing Phase 1 / Starting Phase 2
 1. Wire Atom S3 ↔ Premier 24 per `.planning/hardware/phase-1-wiring.md`
@@ -41,7 +42,7 @@
 7. Drop captured `.bin` files under `tools/captures/` so Plan 02-02 can decode them
 
 ## Next Action
+- **Immediate**: OTA-flash the Plan 02-01 fix-up firmware (commit 55fce6b). Browse to `http://texecom-bridge-2f7dc4b9.local/captures/` — listing page should render. There won't be any files until the panel is wired and a Wintex session runs, but the empty listing + 404-on-traversal would already prove the route is alive.
 - **Phase 1 close still pending hardware**: Plan 01-03 (Wintex validation) needs the bench wired up — see "Hardware Setup" below. Closing Plan 01-03 closes Phase 1.
-- **Phase 2 entry (queued)**: First task on resuming Phase 2 is the Plan 02-01 fix-up — add the `/captures/` HTTP route to the texecom component so the on-device captures are browser-downloadable. This was promised in Plan 02-01's SUMMARY but never built. User-requested priority before any Plan 02-02 grammar/decoder work.
-- **If panel hardware is ready**: `/legion:build` for Phase 1 Plan 01-03 (Wintex validation) → close Phase 1 → `/legion:build` for Phase 2 (Plan 02-01 fix-up first, then Plan 02-02).
-- **If panel hardware is not ready**: Phase 2 plans are written. Resume `/legion:build` whenever the bench is ready.
+- **If panel hardware is ready**: `/legion:build` for Phase 1 Plan 01-03 (Wintex validation) → close Phase 1 → run a Wintex session to populate `/captures/` → download captures via the new web UI → `/legion:build` for Phase 2 Plan 02-02 (decoder, host-testable against the captures).
+- **If panel hardware is not ready**: Plans 02-02 + 02-03 stay queued. Code is fine to sit; CI is green.
