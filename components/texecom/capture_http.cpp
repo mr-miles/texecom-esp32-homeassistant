@@ -152,9 +152,14 @@ class CaptureHttpHandler : public AsyncWebHandler {
     body += "th,td{padding:.3em .8em;text-align:left;border-bottom:1px solid #ccc;}";
     body += "th{background:#f4f4f4;}</style></head><body>";
     body += "<h1>Texecom captures</h1>";
-    body += "<p>Root: <code>" + html_escape_(root) + "</code></p>";
+    // Empty root_path means the writer fell back to LittleFS root after
+    // mkdir of a subdirectory failed (see capture.cpp setup recovery).
+    // The URL prefix (/captures/) is unchanged either way; only the
+    // on-disk layout differs.
+    const std::string iter_path = root.empty() ? "/" : root;
+    body += "<p>Root: <code>" + html_escape_(iter_path) + "</code></p>";
 
-    File dir = LittleFS.open(root.c_str());
+    File dir = LittleFS.open(iter_path.c_str());
     if (!dir || !dir.isDirectory()) {
       body += "<p><em>Capture root is not a directory yet — record a session first.</em></p>";
       body += "</body></html>";

@@ -259,11 +259,18 @@ void Capture::setup() {
     LittleFS.format();
     LittleFS.begin(true);
     if (!ensure_root_directory_()) {
-      ESP_LOGE(TAG, "Capture: filesystem still broken after format; "
-                    "captures disabled");
-      return;
+      // arduino-esp32 LittleFS on this partition appears to reject
+      // subdirectories regardless of mkdir/format. Fall back to writing
+      // capture files at the LittleFS root — they're filtered into the
+      // /captures URL listing by filename prefix. No data loss risk
+      // because nothing else writes to LittleFS root on this device.
+      ESP_LOGW(TAG, "Capture: filesystem won't accept subdirectory "
+                    "creation; falling back to LittleFS root for "
+                    "capture files (URL path /captures/ unchanged)");
+      root_path_ = "";
+    } else {
+      ESP_LOGI(TAG, "Capture: filesystem recovered via format()");
     }
-    ESP_LOGI(TAG, "Capture: filesystem recovered via format()");
   }
   fs_ready_ = true;
   ESP_LOGI(TAG, "Capture ready: root=%s mode=%s max=%u",
