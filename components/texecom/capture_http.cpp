@@ -160,12 +160,17 @@ class CaptureHttpHandler : public AsyncWebHandler {
     body += "<p>Root: <code>" + html_escape_(iter_path) + "</code></p>";
 
     File dir = LittleFS.open(iter_path.c_str());
-    if (!dir || !dir.isDirectory()) {
-      body += "<p><em>Capture root is not a directory yet — record a session first.</em></p>";
+    if (!dir) {
+      body += "<p><em>Capture storage not available — check device log.</em></p>";
       body += "</body></html>";
       request->send(200, "text/html; charset=utf-8", body.c_str());
       return;
     }
+    // Note: we deliberately don't gate on dir.isDirectory() here —
+    // arduino-esp32's LittleFS reports false for the root path "/"
+    // even when openNextFile() iterates correctly. If iteration yields
+    // nothing the "no captures yet" branch below fires, which is the
+    // right UX whether the path is empty or genuinely not a directory.
 
     struct Entry {
       std::string name;
