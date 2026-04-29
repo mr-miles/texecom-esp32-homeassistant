@@ -222,22 +222,48 @@ void Capture::loop() {
 
 #ifdef USE_ARDUINO
 
+bool Capture::ensure_root_directory_() {
+  LittleFS.mkdir(root_path_.c_str());
+  // Functional probe: arduino-esp32's `LittleFS.exists()` and
+  // `isDirectory()` aren't always reliable on a freshly-formatted FS,
+  // so test directly by writing a small marker and removing it. If
+  // the write succeeds the directory definitely exists.
+  std::string probe = root_path_ + "/.txcp-probe";
+  File mf = LittleFS.open(probe.c_str(), "w");
+  if (!mf) return false;
+  mf.write(reinterpret_cast<const uint8_t *>("TXCP"), 4);
+  mf.close();
+  LittleFS.remove(probe.c_str());
+  File dir = LittleFS.open(root_path_.c_str());
+  bool ok = (bool) dir && dir.isDirectory();
+  if (dir) dir.close();
+  return ok;
+}
+
 void Capture::setup() {
   if (fs_ready_) return;
   if (!LittleFS.begin(true /* format on fail */)) {
     ESP_LOGE(TAG, "LittleFS mount failed; capture disabled");
     return;
   }
-  // Ensure root_path_ exists. arduino-esp32's LittleFS won't create
-  // intermediate directories on file write, and `LittleFS.exists()`
-  // doesn't reliably report empty-directory state on a freshly-formatted
-  // FS — so call mkdir unconditionally (it's a no-op if the dir already
-  // exists) and verify by re-checking.
-  LittleFS.mkdir(root_path_.c_str());
-  if (!LittleFS.exists(root_path_.c_str())) {
-    ESP_LOGW(TAG, "Capture: mkdir(%s) appeared to silently fail; "
-                  "open_new_file_() will retry on session start",
-             root_path_.c_str());
+  if (!ensure_root_directory_()) {
+    // Mount succeeded but the directory state is broken (seen on
+    // arduino-esp32 LittleFS after a partial format-on-fail recovery
+    // from a previously-foreign firmware partition). Force a full
+    // format and remount, then retry once. We accept the data loss
+    // because (a) the broken state was already losing every event the
+    // capture writer attempted to flush and (b) this device has no
+    // valuable LittleFS state outside captures.
+    ESP_LOGW(TAG, "Capture: root directory not materialising — forcing "
+                  "LittleFS.format() to clear corrupt state");
+    LittleFS.format();
+    LittleFS.begin(true);
+    if (!ensure_root_directory_()) {
+      ESP_LOGE(TAG, "Capture: filesystem still broken after format; "
+                    "captures disabled");
+      return;
+    }
+    ESP_LOGI(TAG, "Capture: filesystem recovered via format()");
   }
   fs_ready_ = true;
   ESP_LOGI(TAG, "Capture ready: root=%s mode=%s max=%u",

@@ -157,6 +157,11 @@ class Capture {
   }
 
   // ---- Lifecycle (called by Texecom) -----------------------------------
+  // Probe whether root_path_ is a usable directory by writing a small
+  // marker file inside it and then removing the marker. Returns true
+  // only if both the write AND a final isDirectory() check pass.
+  bool ensure_root_directory_();
+
   // Initialize the LittleFS mount + create the root_path directory.
   // Safe to call repeatedly; idempotent.
   void setup();
