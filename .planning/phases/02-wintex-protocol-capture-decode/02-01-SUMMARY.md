@@ -331,3 +331,101 @@ and confirm the listing renders, then click a `.bin` link to verify the
 download prompt. The user-instruction block above for collecting
 captures stays valid — only the download URL changes from the broken
 `/file?file=/captures/...` pattern to the real `/captures/<name>` route.
+
+---
+
+## Plan 02-01 fix-up part 2 — pivot to RAM-only storage (2026-04-30)
+
+The HTTP route from part 1 above hit a deeper problem on contact with
+the live device: capture **writes were silently dropping**.
+
+### Symptom
+
+Confirmed across many sessions on the Atom S3:
+
+```
+capture: opened /wintex-boot38559-001.bin
+capture: post-write exists() bin=false txt=false   <-- !
+capture: closed /wintex-boot38559-001.bin (56 bytes)
+```
+
+`LittleFS.open(path, "w")` returned a valid handle. `f.write()` and
+`f.close()` returned success. Yet `LittleFS.exists(path)` returned
+`false` immediately after. The "files" we appeared to write went into
+a black hole as far as any subsequent read was concerned.
+
+### Diagnosis
+
+Symptom reproduced after a full `esptool erase_flash` + USB reflash —
+ruling out residual partition corruption from the device's prior
+F1p Ecodan firmware. Root cause: **ESPHome's build links two
+LittleFS implementations on the same partition**:
+
+- `arduino-esp32`'s bundled LittleFS (used by `capture.cpp` via
+  `LittleFS.open` / `FS.h`)
+- joltwallet's `esp_littlefs` (pulled in by `web_server_idf` for
+  the `web_server:` block we re-enabled, mounted via VFS)
+
+Both report mount-success. Their state isn't coherent — writes via
+the Arduino API don't appear via the IDF VFS read path. We tried:
+
+1. mkdir on every session start with retry — no effect
+2. `LittleFS.format()` recovery on directory probe failure — no effect
+3. Falling back to LittleFS root (no subdirectory) — writes still
+   silently dropped
+4. `CONFIG_LITTLEFS_SPIFFS_COMPAT=1` build flag — broke the build
+   (it's an arduino-esp32 LittleFS flag; the joltwallet variant has a
+   different API surface and rejected the symbols)
+5. Full `esptool erase_flash` — no effect (confirms it isn't a
+   residual partition state)
+
+After 7 dead-end commits (b81dcec → ca1ddd8) we pivoted.
+
+### Pivot
+
+Capture storage is now **in-RAM only**, commit `25ee3cb`:
+
+- `Capture` owns a `std::vector<RamCapture>` of (name, bytes, mtime)
+  tuples. One entry per `.bin`, one per `.txt`.
+- `set_max_total_bytes()` (default **128 KB**) caps total RAM used
+  across all stored captures. When a write would push over budget,
+  the oldest capture is evicted; the live `.bin`/`.txt` are skipped
+  to avoid mid-session truncation.
+- HTTP listing iterates `Capture::list_captures()` snapshots; file
+  download streams from `Capture::get_capture_bytes()` via
+  `httpd_resp_send_chunk` in 1 KB chunks.
+- TXCP wire format unchanged — host-side parser tests still pass
+  bit-for-bit.
+
+### YAML schema change
+
+- Dropped `capture_root` (no on-disk path).
+- Renamed `capture_max_file_bytes` → `capture_max_ram_bytes`
+  (default `131072`).
+
+Existing YAMLs need a one-line update; example deployed at
+`esphome/texecom-bridge.yaml:154`.
+
+### Trade-off
+
+Captures are **lost on reboot**. The user's workflow ("run a Wintex
+session → immediately download from the device's web UI") doesn't
+require persistence; this isn't worse than what we had (where writes
+also vanished, just less visibly).
+
+### Live verification (2026-04-30)
+
+End-to-end pass on the bench device:
+
+| Check | Result |
+|---|---|
+| Listing renders with two files (`.bin`, `.txt`) after a TCP/10001 session | ✅ |
+| Storage diagnostic shows `725 / 131072 bytes used` | ✅ |
+| `.bin` HTTP 200, byte-count matches listed size, magic = `TXCP` | ✅ |
+| `.txt` HTTP 200, banner + xxd-style hex dump renders inline | ✅ |
+| `foo.exe` returns HTTP 404 (extension whitelist) | ✅ |
+| Boot log shows `Capture ready: in-RAM (max=131072 bytes)` | ✅ |
+
+Eviction across two sessions and the "single session exceeds budget"
+WARN path remain to be exercised against real bench traffic; no
+automated test covers them.
