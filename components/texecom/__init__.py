@@ -7,8 +7,10 @@ Phase 1 scope: transparent byte pipe on TCP port 10001, single client,
 Monitor/Bridge session state machine. Phase 2 wires in decode/encode;
 Phase 3 wires in MQTT auto-discovery.
 
-Plan 02-01 adds on-device capture of every byte the bridge moves,
-persisted to LittleFS and downloadable via the ESPHome web_server.
+Plan 02-01 adds on-device capture of every byte the bridge moves. Captures
+are stored IN RAM (no LittleFS) and downloadable via the ESPHome
+web_server. Cross-reboot persistence is intentionally not provided — the
+workflow is "run a Wintex session -> immediately download from /captures/".
 """
 
 import esphome.codegen as cg
@@ -29,8 +31,7 @@ CONF_TCP_PORT = "tcp_port"
 
 # Plan 02-01: capture configuration.
 CONF_RECORD_WHEN = "record_when"
-CONF_CAPTURE_MAX_FILE_BYTES = "capture_max_file_bytes"
-CONF_CAPTURE_ROOT = "capture_root"
+CONF_CAPTURE_MAX_RAM_BYTES = "capture_max_ram_bytes"
 
 texecom_ns = cg.esphome_ns.namespace("texecom")
 Texecom = texecom_ns.class_("Texecom", cg.Component)
@@ -50,15 +51,13 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Required(CONF_UART_ID): cv.use_id(uart.UARTComponent),
         cv.Optional(CONF_TCP_PORT, default=10001): cv.port,
         # Capture options. Defaults: record only while a Wintex client is
-        # connected (Bridge mode), rotate at 256 KB, store under
-        # /captures on the device's LittleFS.
+        # connected (Bridge mode), keep up to 128 KB of captures in RAM.
         cv.Optional(CONF_RECORD_WHEN, default="bridge"): cv.enum(
             RECORD_MODES, lower=True
         ),
-        cv.Optional(CONF_CAPTURE_MAX_FILE_BYTES, default=262144): cv.int_range(
-            min=4096, max=4 * 1024 * 1024
+        cv.Optional(CONF_CAPTURE_MAX_RAM_BYTES, default=131072): cv.int_range(
+            min=4096, max=1024 * 1024
         ),
-        cv.Optional(CONF_CAPTURE_ROOT, default="/captures"): cv.string_strict,
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -73,17 +72,13 @@ async def to_code(config):
 
     # Capture wiring (Plan 02-01).
     cg.add(var.set_capture_mode(config[CONF_RECORD_WHEN]))
-    cg.add(var.set_capture_max_file_bytes(config[CONF_CAPTURE_MAX_FILE_BYTES]))
-    cg.add(var.set_capture_root(config[CONF_CAPTURE_ROOT]))
+    cg.add(var.set_capture_max_ram_bytes(config[CONF_CAPTURE_MAX_RAM_BYTES]))
 
     # TCP listener uses ESPHome's native `socket` component (declared in
     # DEPENDENCIES). No third-party TCP library is required — the
     # previous callback-driven TCP library has been removed.
 
-    # LittleFS access for capture persistence. FS and LittleFS are
-    # bundled with the Arduino-ESP32 core but ESPHome's external
-    # components don't pick them up automatically; declaring them
-    # here puts the framework headers on the include path so
-    # capture.cpp's `#include <LittleFS.h>` resolves.
-    cg.add_library("FS", None)
-    cg.add_library("LittleFS", None)
+    # No filesystem dependencies — captures live entirely in heap RAM.
+    # The previous FS / LittleFS library declarations were dropped along
+    # with the on-disk writer; web_server_idf still pulls in its own
+    # esp_littlefs through ESPHome core if the build needs it.

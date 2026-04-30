@@ -20,18 +20,18 @@
 //                               the user can read the hex dump directly.
 //
 // Path safety:
-//   Only files directly under root_path_ (no nested directories) are
-//   served. The filename is validated against `is_safe_capture_filename()`
-//   below — that pure function rejects anything that could escape the
-//   intended directory or smuggle control bytes into the filesystem call.
-//   This is defence-in-depth on a LAN-only device; cheap to do right.
+//   The capture store is keyed by basename (no nested paths exist), and
+//   the requested filename is validated against
+//   `is_safe_capture_filename()` below — that pure function rejects
+//   anything that could embed control bytes or non-whitelisted
+//   extensions. This is defence-in-depth on a LAN-only device; cheap
+//   to do right.
 //
 // Build gating:
 //   The HTTP plumbing only compiles under USE_ARDUINO (Arduino-on-ESP32
 //   framework) AND USE_NETWORK (web_server_base prerequisite). Host unit
 //   tests compile this header for the pure path-safety function only — the
-//   handler class is hidden behind the same guards as capture.cpp's
-//   LittleFS code.
+//   handler class is hidden behind the same guards.
 
 #include <cstddef>
 #include <string>

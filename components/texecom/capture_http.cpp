@@ -15,11 +15,9 @@
 
 #if defined(USE_ARDUINO) && defined(USE_NETWORK)
 #include <Arduino.h>
-#include <LittleFS.h>
 #include <esp_http_server.h>
 
 #include <cstdio>
-#include <ctime>
 #include <vector>
 
 #include "esphome/core/log.h"
@@ -51,7 +49,8 @@ bool is_safe_capture_filename(const std::string &name) {
 
   // Extension whitelist — we only ever write .bin or .txt. Refusing others
   // both keeps the listing tidy and blocks attempts to fetch unrelated
-  // LittleFS state (e.g. ESPHome's own preferences blob).
+  // state. The check is symmetric with the .bin/.txt content-type
+  // selection in send_file_().
   if (name.size() < 5) return false;  // shortest legal: "x.bin"
   std::string ext = name.substr(name.size() - 4);
   std::transform(ext.begin(), ext.end(), ext.begin(),
@@ -69,8 +68,8 @@ namespace {
 
 constexpr const char *const HTTP_TAG = "texecom.capture_http";
 
-// Bytes per chunk for streamed file responses. 1 KB is a sweet spot for
-// LittleFS read latency vs. lwIP send-window pressure on the ESP32-S3.
+// Bytes per chunk for streamed download responses. 1 KB is a sweet spot
+// for lwIP send-window pressure on the ESP32-S3.
 constexpr std::size_t kStreamChunkBytes = 1024;
 
 // Small HTML escape — only the four characters that matter for embedding
@@ -142,7 +141,12 @@ class CaptureHttpHandler : public AsyncWebHandler {
 
  private:
   void send_listing_(AsyncWebServerRequest *request) {
-    const std::string &root = capture_->root_path();
+    auto entries = capture_->list_captures();
+    std::sort(entries.begin(), entries.end(),
+              [](const RamCaptureSnapshot &a, const RamCaptureSnapshot &b) {
+                return a.name < b.name;
+              });
+
     std::string body;
     body.reserve(2048);
     body += "<!doctype html>\n<html><head><meta charset=\"utf-8\">";
@@ -152,44 +156,21 @@ class CaptureHttpHandler : public AsyncWebHandler {
     body += "th,td{padding:.3em .8em;text-align:left;border-bottom:1px solid #ccc;}";
     body += "th{background:#f4f4f4;}</style></head><body>";
     body += "<h1>Texecom captures</h1>";
-    // Empty root_path means the writer fell back to LittleFS root after
-    // mkdir of a subdirectory failed (see capture.cpp setup recovery).
-    // The URL prefix (/captures/) is unchanged either way; only the
-    // on-disk layout differs.
-    const std::string iter_path = root.empty() ? "/" : root;
-    body += "<p>Root: <code>" + html_escape_(iter_path) + "</code></p>";
-
-    // Iterate via the in-memory known_captures list rather than opening
-    // the LittleFS root — the latter is unreliable on this hardware
-    // (LittleFS.open("/") returns an invalid handle on some
-    // arduino-esp32 partitions). Filenames the writer has opened in
-    // this boot are recorded; we stat them via direct file open to
-    // get current size and mtime.
-    struct Entry {
-      std::string name;
-      std::size_t size;
-      time_t mtime;
-    };
-    std::vector<Entry> entries;
-    for (const std::string &fname : capture_->known_captures()) {
-      if (!is_safe_capture_filename(fname)) continue;
-      std::string full = iter_path;
-      if (full.empty() || full.back() != '/') full += '/';
-      full += fname;
-      File f = LittleFS.open(full.c_str(), "r");
-      if (!f) continue;
-      entries.push_back({fname, (std::size_t) f.size(), f.getLastWrite()});
-      f.close();
+    {
+      char diag[128];
+      std::snprintf(diag, sizeof(diag),
+                    "<p>Storage: in-RAM (%u / %u bytes used)</p>",
+                    (unsigned) capture_->total_bytes_used(),
+                    (unsigned) capture_->max_total_bytes());
+      body += diag;
     }
-
-    std::sort(entries.begin(), entries.end(),
-              [](const Entry &a, const Entry &b) { return a.name < b.name; });
 
     if (entries.empty()) {
       body += "<p><em>No capture files yet.</em></p>";
     } else {
-      body += "<table><tr><th>File</th><th>Size (bytes)</th><th>Modified</th></tr>";
-      char ts_buf[32];
+      body += "<table><tr><th>File</th><th>Size (bytes)</th>"
+              "<th>Modified</th></tr>";
+      uint32_t now_ms = (uint32_t) millis();
       for (const auto &e : entries) {
         body += "<tr><td><a href=\"";
         body += html_escape_(e.name);
@@ -198,11 +179,13 @@ class CaptureHttpHandler : public AsyncWebHandler {
         body += "</a></td><td>";
         body += std::to_string(e.size);
         body += "</td><td>";
-        if (e.mtime > 0) {
-          struct tm tm_buf;
-          gmtime_r(&e.mtime, &tm_buf);
-          strftime(ts_buf, sizeof(ts_buf), "%Y-%m-%d %H:%M:%SZ", &tm_buf);
-          body += ts_buf;
+        // No wall clock on this device — show "Ns ago" relative to now.
+        // mtime_ms is millis() at last write.
+        if (e.mtime_ms != 0 && now_ms >= e.mtime_ms) {
+          uint32_t delta_s = (now_ms - e.mtime_ms) / 1000u;
+          char buf[32];
+          std::snprintf(buf, sizeof(buf), "%us ago", (unsigned) delta_s);
+          body += buf;
         } else {
           body += "&mdash;";
         }
@@ -215,18 +198,8 @@ class CaptureHttpHandler : public AsyncWebHandler {
   }
 
   void send_file_(AsyncWebServerRequest *request, const std::string &name) {
-    std::string path = capture_->root_path();
-    if (path.empty() || path.back() != '/') path += '/';
-    path += name;
-
-    if (!LittleFS.exists(path.c_str())) {
-      request->send(404, "text/plain", "Not Found");
-      return;
-    }
-
-    File f = LittleFS.open(path.c_str(), "r");
-    if (!f || f.isDirectory()) {
-      if (f) f.close();
+    const std::vector<uint8_t> *bytes = capture_->get_capture_bytes(name);
+    if (bytes == nullptr) {
       request->send(404, "text/plain", "Not Found");
       return;
     }
@@ -235,12 +208,12 @@ class CaptureHttpHandler : public AsyncWebHandler {
                    std::strcmp(name.c_str() + name.size() - 4, ".bin") == 0);
     const char *content_type = is_bin ? "application/octet-stream"
                                       : "text/plain; charset=utf-8";
+
     httpd_req_t *req = static_cast<httpd_req_t *>(*request);
     httpd_resp_set_status(req, "200 OK");
     httpd_resp_set_type(req, content_type);
-    // Length header lets browsers show progress; cast through %u via snprintf.
     char clen[24];
-    std::snprintf(clen, sizeof(clen), "%u", (unsigned) f.size());
+    std::snprintf(clen, sizeof(clen), "%u", (unsigned) bytes->size());
     httpd_resp_set_hdr(req, "Content-Length", clen);
     // .bin: prompt to save with the original filename. .txt: render inline.
     std::string disp;
@@ -250,19 +223,21 @@ class CaptureHttpHandler : public AsyncWebHandler {
     disp += "\"";
     httpd_resp_set_hdr(req, "Content-Disposition", disp.c_str());
 
-    // Stream the file in chunks so we never need a 256 KB heap allocation.
-    uint8_t buf[kStreamChunkBytes];
-    while (true) {
-      int n = f.read(buf, sizeof(buf));
-      if (n <= 0) break;
-      esp_err_t err = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(buf), n);
+    // Stream out in fixed-size chunks so we don't pin a large send buffer.
+    const uint8_t *src = bytes->data();
+    std::size_t remaining = bytes->size();
+    while (remaining > 0) {
+      std::size_t n = remaining < kStreamChunkBytes ? remaining : kStreamChunkBytes;
+      esp_err_t err = httpd_resp_send_chunk(req, reinterpret_cast<const char *>(src),
+                                            n);
       if (err != ESP_OK) {
-        ESP_LOGW(HTTP_TAG, "send_chunk failed err=%d on %s", (int) err, path.c_str());
+        ESP_LOGW(HTTP_TAG, "send_chunk failed err=%d on %s", (int) err, name.c_str());
         break;
       }
+      src += n;
+      remaining -= n;
     }
     httpd_resp_send_chunk(req, nullptr, 0);  // terminate chunked response
-    f.close();
   }
 
   Capture *capture_;

@@ -141,16 +141,17 @@ uart:
 # The TCP<->UART bridge.
 #
 # Capture options (Plan 02-01):
-#   record_when:           bridge | monitor | both | none   (default: bridge)
-#   capture_max_file_bytes: rotate at this size in bytes    (default: 262144)
-#   capture_root:           LittleFS directory for files    (default: /captures)
+#   record_when:           bridge | monitor | both | none  (default: bridge)
+#   capture_max_ram_bytes: total RAM budget across stored captures
+#                                                          (default: 131072)
+# Captures live in heap RAM only — no LittleFS persistence in this build.
+# Download via http://<device>/captures/ before rebooting.
 texecom:
   id: panel_bridge
   uart_id: panel_uart
   tcp_port: 10001
   record_when: bridge
-  capture_max_file_bytes: 262144
-  capture_root: "/captures"
+  capture_max_ram_bytes: 131072
 
 # Phase 1.5 device-health entities. These are independent of any panel
 # data — they exercise the MQTT discovery path end-to-end so Phase 3 can

@@ -3,19 +3,32 @@
 // On-device capture of bytes flowing through the Texecom bridge.
 //
 // Plan 02-01 deliverable. Records every byte the bridge moves in either
-// direction with a relative microsecond timestamp into a rotating LittleFS
-// file. Files are downloadable over HTTP via the ESPHome web_server; the
-// binary format is documented below and host-side tested via
-// `tests/test_capture.cpp` so the parser used in Plan 02-02 has a
-// guaranteed wire-format contract.
+// direction with a relative microsecond timestamp. Files are downloadable
+// over HTTP via the ESPHome web_server; the binary format is documented
+// below and host-side tested via `tests/test_capture.cpp` so the parser
+// used in Plan 02-02 has a guaranteed wire-format contract.
+//
+// =====================================================================
+// Storage model: in-RAM (no LittleFS)
+// =====================================================================
+//
+// The original implementation persisted captures to LittleFS. On this
+// Atom S3 partition the arduino-esp32 bundled LittleFS and joltwallet's
+// esp_littlefs (used by web_server_idf) don't share state — writes
+// reported success but `LittleFS.exists()` returned false immediately
+// afterwards, with the same behaviour after a full `esptool erase_flash`
+// + USB reflash. Since the workflow is "run a Wintex session ->
+// immediately download from the device's web UI", cross-reboot
+// persistence is not required: captures live in heap RAM and are evicted
+// oldest-first when a configurable byte budget is exceeded.
 //
 // =====================================================================
 // TXCP binary format v1 (LOCKED — do not change without bumping version)
 // =====================================================================
 //
-// File layout: <header><event><event>...<event>
+// Capture layout: <header><event><event>...<event>
 //
-// File header — exactly 32 bytes, written once per file:
+// File header — exactly 32 bytes, written once per capture:
 //   offset  size  field           notes
 //   0       4     magic           ASCII "TXCP" (0x54 0x58 0x43 0x50)
 //   4       2     version         uint16 little-endian, == 1
@@ -46,27 +59,24 @@
 //     ~512B). Records can therefore be parsed linearly without any
 //     framing markers, which keeps the parser trivial.
 //
-// Rotation:
-//   * New file when the current file reaches `max_file_bytes` (default
-//     262144 = 256 KB).
-//   * New file on `on_session_start()` (Bridge mode begins) and
-//     `on_session_end()` (Bridge mode ends) so each Wintex session lands
-//     in its own pair of files.
-//   * Filename: "{root}/wintex-{unix_ts}-{seq}.bin" if SNTP synced, else
-//     "{root}/wintex-boot{boot_ms}-{seq}.bin". Sequence counter avoids
+// Per-session capture pair:
+//   * Each Wintex session produces one .bin (the TXCP byte stream) and
+//     one .txt (xxd-style hex sidecar that renders inline in the browser).
+//   * Filename: "wintex-{unix_ts}-{seq}.bin" if SNTP synced, else
+//     "wintex-boot{boot_ms}-{seq}.bin". Sequence counter avoids
 //     collisions inside one boot.
 //
-// Hex-dump sidecar:
-//   * For each .bin a paired .txt is written incrementally (xxd-style:
-//     16 bytes/line, hex offset, hex bytes, ASCII gutter). Browsing the
-//     .txt in a browser gives a human-readable view without downloading.
+// Budget eviction:
+//   * Total RAM used by all stored captures is bounded by
+//     `max_total_bytes_` (default 128 KB). When a write would push the
+//     total over budget, the OLDEST capture is evicted first. The
+//     currently-live .bin / .txt are skipped — truncating the active
+//     session would corrupt mid-flight events.
 //
 // Backpressure:
-//   * In-memory ring buffer of N events (default 64). If full and the
-//     LittleFS flush is slow, the new event is dropped and `drops_` is
-//     incremented; a single WARN log fires per overflow burst. The bridge
-//     NEVER blocks on capture — losing capture bytes is preferable to
-//     stalling the UART pipe.
+//   * In-memory ring buffer of N events (default 64). If full, the new
+//     event is dropped and `drops_` is incremented; a single WARN log
+//     fires per overflow burst. The bridge NEVER blocks on capture.
 
 #include <array>
 #include <cstddef>
@@ -85,7 +95,7 @@ static constexpr std::size_t kCaptureEventFixedSize = 11;  // direction + ts + l
 static constexpr uint16_t kCaptureFormatVersion = 1;
 static constexpr uint8_t kCaptureMagic[4] = {'T', 'X', 'C', 'P'};
 static constexpr std::size_t kCapturePanelNameLen = 16;
-static constexpr std::size_t kDefaultCaptureMaxFileBytes = 262144;  // 256 KB
+static constexpr std::size_t kDefaultCaptureMaxRamBytes = 131072;  // 128 KB
 static constexpr std::size_t kCaptureRingEvents = 64;
 
 // Plain-old-data view of a header for serialize/parse. Kept POD so it
@@ -127,8 +137,18 @@ std::size_t parse_event(const uint8_t *in, std::size_t in_len,
                         uint8_t &direction, uint64_t &timestamp_us,
                         uint16_t &length, const uint8_t *&payload);
 
-// Capture sink: owns the per-event ring buffer and (on-device) the
-// LittleFS file handles.
+// Snapshot view of a stored capture, returned by list_captures(). Copy
+// of the metadata only — does not alias internal storage.
+struct RamCaptureSnapshot {
+  std::string name;     // basename, e.g. "wintex-boot1234-001.bin"
+  std::size_t size;     // bytes currently in this capture
+  uint32_t mtime_ms;    // millis() at last write — best-effort, no wall-clock
+};
+
+// Capture sink: owns the per-event ring buffer and the in-RAM capture
+// store. Values returned by `get_capture_bytes()` reference internal
+// vectors and are invalidated by any mutating call (record(),
+// on_session_start(), eviction).
 class Capture {
  public:
   enum class Mode : uint8_t {
@@ -143,35 +163,30 @@ class Capture {
   // ---- Configuration (call before setup()) -----------------------------
   void set_mode(Mode m) { mode_ = m; }
   void set_panel_name(const std::string &name) { panel_name_ = name; }
-  void set_max_file_bytes(std::size_t bytes) {
-    max_file_bytes_ = bytes ? bytes : kDefaultCaptureMaxFileBytes;
+  void set_max_total_bytes(std::size_t bytes) {
+    max_total_bytes_ = bytes ? bytes : kDefaultCaptureMaxRamBytes;
   }
-  void set_root_path(const std::string &path) { root_path_ = path; }
   void set_baud_rate(uint32_t baud) { baud_rate_ = baud; }
 
   // Test/host hook: when set, serialized bytes are sent to this sink
-  // INSTEAD OF being written to LittleFS. Lets host tests observe the
-  // exact byte stream the device would persist without faking a
-  // filesystem.
+  // INSTEAD OF being appended to the in-RAM capture. Lets host tests
+  // observe the exact byte stream the device would persist without
+  // exercising the eviction logic.
   void set_sink_for_test(std::function<void(const uint8_t *, std::size_t)> sink) {
     test_sink_ = std::move(sink);
   }
 
   // ---- Lifecycle (called by Texecom) -----------------------------------
-  // Probe whether root_path_ is a usable directory by writing a small
-  // marker file inside it and then removing the marker. Returns true
-  // only if both the write AND a final isDirectory() check pass.
-  bool ensure_root_directory_();
-
-  // Initialize the LittleFS mount + create the root_path directory.
-  // Safe to call repeatedly; idempotent.
+  // No filesystem to mount — just logs the configured budget.
   void setup();
 
-  // Begin a new capture file. Resets the relative microsecond clock and
-  // emits a fresh TXCP header. Called from Texecom::on_new_client_().
+  // Begin a new capture. Pushes a fresh .bin/.txt pair into the in-RAM
+  // store, writes the header banner, and resets the relative-time clock.
+  // Called from Texecom::on_new_client_().
   void on_session_start();
 
-  // Close the current file (if any) and flush. Called from
+  // Flush any queued events and mark the live capture closed (it stays
+  // in the store, available for download). Called from
   // Texecom::on_client_disconnect_().
   void on_session_end();
 
@@ -188,19 +203,20 @@ class Capture {
   // ---- Diagnostics -----------------------------------------------------
   Mode mode() const { return mode_; }
   const char *mode_str() const;
-  std::size_t max_file_bytes() const { return max_file_bytes_; }
-  const std::string &root_path() const { return root_path_; }
+  std::size_t max_total_bytes() const { return max_total_bytes_; }
+  std::size_t total_bytes_used() const { return total_bytes_used_; }
   uint32_t drops() const { return drops_; }
   uint32_t bytes_written() const { return bytes_written_total_; }
   bool is_session_active() const { return session_active_; }
 
-  // Filenames (basename only — no path prefix) of capture files this
-  // process knows about. Maintained as files are opened, NOT by
-  // iterating LittleFS — arduino-esp32's `LittleFS.open("/")` returns
-  // an invalid handle on some partitions, so directory iteration is
-  // unreliable. The list is lost across reboots; for this project's
-  // capture-then-immediately-download workflow that's acceptable.
-  const std::vector<std::string> &known_captures() const { return known_captures_; }
+  // Snapshot of every capture currently held in RAM. Cheap to call —
+  // returns copies; safe to use from the HTTP handler thread.
+  std::vector<RamCaptureSnapshot> list_captures() const;
+
+  // Lookup the raw byte vector for a capture by basename. Returns
+  // nullptr if not found. The returned pointer is valid until the next
+  // call that mutates `captures_` (record, on_session_start, eviction).
+  const std::vector<uint8_t> *get_capture_bytes(const std::string &name) const;
 
   // True when the caller's mode + current session state would actually
   // persist a `record()` call. Lets Texecom skip the per-byte loop on
@@ -212,20 +228,33 @@ class Capture {
   }
 
  private:
-  // Internal helpers — implementation in capture.cpp. Anything
-  // touching LittleFS is guarded by USE_ARDUINO so host tests link.
-  void open_new_file_();
-  void close_current_file_();
+  // In-RAM capture entry. Each session produces a .bin and a paired .txt.
+  struct RamCapture {
+    std::string name;             // basename
+    std::vector<uint8_t> bytes;   // header + serialized events, OR hex-dump text
+    uint32_t mtime_ms{0};
+    bool is_text{false};
+  };
+
+  // Internal helpers.
+  void open_new_capture_();
+  void close_current_capture_();
   void write_bytes_(const uint8_t *bytes, std::size_t len);
   void write_hexdump_(uint64_t file_offset, const uint8_t *bytes, std::size_t len);
   void enqueue_event_(uint8_t direction, const uint8_t *bytes, std::size_t len);
   void flush_ring_();
+  // Evict oldest captures until total_bytes_used_ <= max_total_bytes_.
+  // Skips the live .bin / .txt — if those alone exceed the budget, logs
+  // a single WARN and returns without truncating mid-session.
+  void enforce_budget_();
+  // Append `len` bytes to capture index `idx` and update accounting.
+  // Caller must hold a valid index.
+  void append_to_(int idx, const uint8_t *bytes, std::size_t len);
 
   // Configuration.
   Mode mode_{Mode::BridgeOnly};
   std::string panel_name_{"Premier 24"};
-  std::string root_path_{"/captures"};
-  std::size_t max_file_bytes_{kDefaultCaptureMaxFileBytes};
+  std::size_t max_total_bytes_{kDefaultCaptureMaxRamBytes};
   uint32_t baud_rate_{19200};
 
   // Test sink (set_sink_for_test). When non-null, persistence is
@@ -234,19 +263,19 @@ class Capture {
 
   // Runtime state.
   bool session_active_{false};
-  bool fs_ready_{false};
   uint64_t session_start_us_{0};
   uint32_t file_seq_{0};
   uint32_t drops_{0};
   uint32_t bytes_written_total_{0};
-  uint32_t current_file_bytes_{0};
   uint32_t warn_throttle_{0};
+  bool budget_warn_emitted_{false};
 
-  // Basenames of capture files we've opened in this boot, maintained so
-  // the HTTP listing handler doesn't need to iterate LittleFS directly
-  // (which is unreliable on some arduino-esp32 partitions — see
-  // known_captures() comment).
-  std::vector<std::string> known_captures_{};
+  // In-RAM capture store. Index-based to keep current_*_idx_ pointers
+  // stable across pushes; eviction adjusts the indices in lock-step.
+  std::vector<RamCapture> captures_{};
+  std::size_t total_bytes_used_{0};
+  int current_bin_idx_{-1};
+  int current_txt_idx_{-1};
 
   // Per-event ring. We store the variable-length payload inline up to a
   // bounded size; larger pushes get split or dropped (Wintex frames stay
@@ -262,10 +291,6 @@ class Capture {
   std::size_t ring_head_{0};
   std::size_t ring_tail_{0};
   std::size_t ring_size_{0};
-
-  // Current file path (for HTTP listings / dump_config).
-  std::string current_path_bin_{};
-  std::string current_path_txt_{};
 };
 
 }  // namespace texecom

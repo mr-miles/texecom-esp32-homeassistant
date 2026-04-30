@@ -75,7 +75,7 @@ void Texecom::setup() {
   // function is a no-op on host builds and on devices without a
   // web_server (e.g. CI), and idempotent if setup() is invoked twice.
 #if defined(USE_ARDUINO) && defined(USE_NETWORK)
-  register_capture_http_handler(&capture_, capture_.root_path());
+  register_capture_http_handler(&capture_, "/captures");
 #endif
 
   // Create the TCP listener. `socket_listen()` returns a ListenSocket,
@@ -136,8 +136,8 @@ void Texecom::loop() {
   accept_pending_client_();
   pump_uart_to_tcp_();
   pump_tcp_to_uart_();
-  // Drain any queued capture events to LittleFS. Bounded work; safe to
-  // call every tick.
+  // Drain any queued capture events into the in-RAM store. Bounded
+  // work; safe to call every tick.
   capture_.loop();
 }
 
@@ -152,9 +152,9 @@ void Texecom::dump_config() {
   ESP_LOGCONFIG(TAG, "  Session:    %s", is_bridge_mode() ? "Bridge" : "Monitor");
   ESP_LOGCONFIG(TAG, "  Buffers:    %u bytes each direction", (unsigned) kBufferSize);
   ESP_LOGCONFIG(TAG, "  Capture mode:  %s", capture_.mode_str());
-  ESP_LOGCONFIG(TAG, "  Capture max:   %u bytes/file", (unsigned) capture_.max_file_bytes());
-  ESP_LOGCONFIG(TAG, "  Capture root:  %s", capture_.root_path().c_str());
-  ESP_LOGCONFIG(TAG, "  Capture URL:   http://<device>%s/", capture_.root_path().c_str());
+  ESP_LOGCONFIG(TAG, "  Capture store: in-RAM, max %u bytes",
+                (unsigned) capture_.max_total_bytes());
+  ESP_LOGCONFIG(TAG, "  Capture URL:   http://<device>/captures/");
   ESP_LOGCONFIG(TAG, "  Capture drops: %u events lost", (unsigned) capture_.drops());
 }
 

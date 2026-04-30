@@ -1,14 +1,10 @@
 #include "capture.h"
 
-// LittleFS / time-of-day pieces are Arduino-framework only. Host unit
-// tests build with USE_ARDUINO undefined and exercise the pure
-// serializers directly; the on-device persistence path is excluded.
+// On-device millis()/time() are Arduino-framework only. Host unit tests
+// build with USE_ARDUINO undefined and exercise the pure serializers
+// directly; the on-device persistence path is excluded.
 #ifdef USE_ARDUINO
 #include <Arduino.h>
-// LittleFS.h transitively includes FS.h on Arduino-ESP32; declaring
-// FS/LittleFS as build deps in __init__.py is what gets the headers
-// onto the include path.
-#include <LittleFS.h>
 #include <time.h>
 #include "esphome/core/log.h"
 #endif
@@ -143,6 +139,24 @@ const char *Capture::mode_str() const {
   return "?";
 }
 
+// ---------- Snapshot accessors (always built) ------------------------------
+
+std::vector<RamCaptureSnapshot> Capture::list_captures() const {
+  std::vector<RamCaptureSnapshot> out;
+  out.reserve(captures_.size());
+  for (const auto &c : captures_) {
+    out.push_back({c.name, c.bytes.size(), c.mtime_ms});
+  }
+  return out;
+}
+
+const std::vector<uint8_t> *Capture::get_capture_bytes(const std::string &name) const {
+  for (const auto &c : captures_) {
+    if (c.name == name) return &c.bytes;
+  }
+  return nullptr;
+}
+
 // ---------- Ring helpers ----------------------------------------------------
 
 void Capture::enqueue_event_(uint8_t direction, const uint8_t *bytes, std::size_t len) {
@@ -218,217 +232,176 @@ void Capture::loop() {
   flush_ring_();
 }
 
-// ---------- Filesystem (Arduino only) ---------------------------------------
+// ---------- In-RAM storage helpers (host + Arduino) ------------------------
 
+void Capture::append_to_(int idx, const uint8_t *bytes, std::size_t len) {
+  if (idx < 0 || idx >= static_cast<int>(captures_.size())) return;
+  if (len == 0) return;
+  RamCapture &c = captures_[idx];
+  c.bytes.insert(c.bytes.end(), bytes, bytes + len);
+  total_bytes_used_ += len;
 #ifdef USE_ARDUINO
-
-bool Capture::ensure_root_directory_() {
-  LittleFS.mkdir(root_path_.c_str());
-  // Functional probe: arduino-esp32's `LittleFS.exists()` and
-  // `isDirectory()` aren't always reliable on a freshly-formatted FS,
-  // so test directly by writing a small marker and removing it. If
-  // the write succeeds the directory definitely exists.
-  std::string probe = root_path_ + "/.txcp-probe";
-  File mf = LittleFS.open(probe.c_str(), "w");
-  if (!mf) return false;
-  mf.write(reinterpret_cast<const uint8_t *>("TXCP"), 4);
-  mf.close();
-  LittleFS.remove(probe.c_str());
-  File dir = LittleFS.open(root_path_.c_str());
-  bool ok = (bool) dir && dir.isDirectory();
-  if (dir) dir.close();
-  return ok;
+  c.mtime_ms = (uint32_t) millis();
+#else
+  c.mtime_ms = 0;
+#endif
 }
 
-void Capture::setup() {
-  if (fs_ready_) return;
-  if (!LittleFS.begin(true /* format on fail */)) {
-    ESP_LOGE(TAG, "LittleFS mount failed; capture disabled");
-    return;
-  }
-  if (!ensure_root_directory_()) {
-    // Mount succeeded but the directory state is broken (seen on
-    // arduino-esp32 LittleFS after a partial format-on-fail recovery
-    // from a previously-foreign firmware partition). Force a full
-    // format and remount, then retry once. We accept the data loss
-    // because (a) the broken state was already losing every event the
-    // capture writer attempted to flush and (b) this device has no
-    // valuable LittleFS state outside captures.
-    ESP_LOGW(TAG, "Capture: root directory not materialising — forcing "
-                  "LittleFS.format() to clear corrupt state");
-    LittleFS.format();
-    LittleFS.begin(true);
-    if (!ensure_root_directory_()) {
-      // arduino-esp32 LittleFS on this partition appears to reject
-      // subdirectories regardless of mkdir/format. Fall back to writing
-      // capture files at the LittleFS root — they're filtered into the
-      // /captures URL listing by filename prefix. No data loss risk
-      // because nothing else writes to LittleFS root on this device.
-      ESP_LOGW(TAG, "Capture: filesystem won't accept subdirectory "
-                    "creation; falling back to LittleFS root for "
-                    "capture files (URL path /captures/ unchanged)");
-      root_path_ = "";
-    } else {
-      ESP_LOGI(TAG, "Capture: filesystem recovered via format()");
+void Capture::enforce_budget_() {
+  // Evict oldest first. Skip the live .bin / .txt — truncating mid-
+  // session would corrupt active events. If both live captures alone
+  // exceed the budget, log once and bail (overflow is preferable to
+  // breaking the live stream).
+  while (total_bytes_used_ > max_total_bytes_) {
+    int victim = -1;
+    for (std::size_t i = 0; i < captures_.size(); ++i) {
+      int signed_i = static_cast<int>(i);
+      if (signed_i == current_bin_idx_) continue;
+      if (signed_i == current_txt_idx_) continue;
+      victim = signed_i;
+      break;
     }
+    if (victim < 0) {
+      if (!budget_warn_emitted_) {
+#ifdef USE_ARDUINO
+        ESP_LOGW(TAG,
+                 "capture: live session exceeds RAM budget (%u > %u); "
+                 "letting it overflow until session ends",
+                 (unsigned) total_bytes_used_, (unsigned) max_total_bytes_);
+#endif
+        budget_warn_emitted_ = true;
+      }
+      return;
+    }
+    total_bytes_used_ -= captures_[victim].bytes.size();
+    captures_.erase(captures_.begin() + victim);
+    // Adjust live indices: erasing at index `victim` shifts every
+    // subsequent index down by one.
+    if (current_bin_idx_ > victim) --current_bin_idx_;
+    if (current_txt_idx_ > victim) --current_txt_idx_;
   }
-  fs_ready_ = true;
-  ESP_LOGI(TAG, "Capture ready: root=%s mode=%s max=%u",
-           root_path_.c_str(), mode_str(), (unsigned) max_file_bytes_);
 }
 
-void Capture::on_session_start() {
-  session_active_ = true;
-  session_start_us_ = (uint64_t) micros();
-  if (mode_ == Mode::None) return;
-  if (mode_ == Mode::MonitorOnly) return;  // capture only Monitor traffic
-  open_new_file_();
-}
-
-void Capture::on_session_end() {
-  // Flush queued events to disk before closing.
-  flush_ring_();
-  close_current_file_();
-  session_active_ = false;
-}
-
-void Capture::open_new_file_() {
-  if (!fs_ready_) {
-    setup();
-    if (!fs_ready_) return;
-  }
-  close_current_file_();
+void Capture::open_new_capture_() {
+  close_current_capture_();
 
   uint32_t seq = ++file_seq_;
+  uint32_t now_unix = 0;
+  uint32_t now_ms = 0;
+#ifdef USE_ARDUINO
   time_t now = 0;
   ::time(&now);
-  char path_bin[96];
-  char path_txt[96];
-  if (now > 1700000000) {
-    snprintf(path_bin, sizeof(path_bin), "%s/wintex-%lu-%03u.bin",
-             root_path_.c_str(), (unsigned long) now, (unsigned) seq);
-    snprintf(path_txt, sizeof(path_txt), "%s/wintex-%lu-%03u.txt",
-             root_path_.c_str(), (unsigned long) now, (unsigned) seq);
-  } else {
-    snprintf(path_bin, sizeof(path_bin), "%s/wintex-boot%lu-%03u.bin",
-             root_path_.c_str(), (unsigned long) millis(), (unsigned) seq);
-    snprintf(path_txt, sizeof(path_txt), "%s/wintex-boot%lu-%03u.txt",
-             root_path_.c_str(), (unsigned long) millis(), (unsigned) seq);
-  }
-  current_path_bin_ = path_bin;
-  current_path_txt_ = path_txt;
+  if (now > 1700000000) now_unix = (uint32_t) now;
+  now_ms = (uint32_t) millis();
+#endif
 
-  // Write header to the .bin and a banner to the .txt.
+  char name_bin[64];
+  char name_txt[64];
+  if (now_unix > 0) {
+    snprintf(name_bin, sizeof(name_bin), "wintex-%lu-%03u.bin",
+             (unsigned long) now_unix, (unsigned) seq);
+    snprintf(name_txt, sizeof(name_txt), "wintex-%lu-%03u.txt",
+             (unsigned long) now_unix, (unsigned) seq);
+  } else {
+    snprintf(name_bin, sizeof(name_bin), "wintex-boot%lu-%03u.bin",
+             (unsigned long) now_ms, (unsigned) seq);
+    snprintf(name_txt, sizeof(name_txt), "wintex-boot%lu-%03u.txt",
+             (unsigned long) now_ms, (unsigned) seq);
+  }
+
+  // Build header bytes for the .bin.
   CaptureHeader h;
   h.version = kCaptureFormatVersion;
-  h.start_unix_s = (now > 1700000000) ? (uint32_t) now : 0;
+  h.start_unix_s = now_unix;
   h.set_panel_name(panel_name_);
   h.baud_rate = baud_rate_;
   uint8_t hdr[kCaptureHeaderSize];
   serialize_header(h, hdr);
 
-  // Defensive mkdir on every session start — works around an edge case
-  // where setup()'s mkdir silently fails on a freshly-formatted FS,
-  // leaving subsequent file opens to fail. Idempotent if the dir
-  // already exists.
-  LittleFS.mkdir(root_path_.c_str());
+  // Build text-banner for the .txt.
+  char banner[128];
+  int banner_n = snprintf(banner, sizeof(banner),
+                          "# TXCP capture v%u panel=%s baud=%u start_unix=%lu\n",
+                          (unsigned) kCaptureFormatVersion, panel_name_.c_str(),
+                          (unsigned) baud_rate_, (unsigned long) h.start_unix_s);
+  if (banner_n < 0) banner_n = 0;
 
-  File f = LittleFS.open(current_path_bin_.c_str(), "w");
-  if (!f) {
-    // First open failed. Most likely cause: the parent directory wasn't
-    // really created. Try mkdir + reopen one more time before giving up.
-    LittleFS.mkdir(root_path_.c_str());
-    f = LittleFS.open(current_path_bin_.c_str(), "w");
-  }
-  if (!f) {
-    ESP_LOGW(TAG, "capture: failed to open %s — capture for this session will be lost",
-             current_path_bin_.c_str());
-    current_path_bin_.clear();
-    current_path_txt_.clear();
-    current_file_bytes_ = 0;
-    return;
-  }
-  f.write(hdr, sizeof(hdr));
-  f.close();
+  // Push the .bin entry first, then the .txt. Indices reflect insertion
+  // order; eviction will adjust them if either is removed.
+  RamCapture bin;
+  bin.name = name_bin;
+  bin.is_text = false;
+  bin.mtime_ms = now_ms;
+  bin.bytes.reserve(kCaptureHeaderSize + 4096);
+  bin.bytes.insert(bin.bytes.end(), hdr, hdr + kCaptureHeaderSize);
+  captures_.push_back(std::move(bin));
+  current_bin_idx_ = static_cast<int>(captures_.size()) - 1;
+  total_bytes_used_ += kCaptureHeaderSize;
 
-  File t = LittleFS.open(current_path_txt_.c_str(), "w");
-  if (t) {
-    char banner[128];
-    int n = snprintf(banner, sizeof(banner),
-                     "# TXCP capture v%u panel=%s baud=%u start_unix=%lu\n",
-                     (unsigned) kCaptureFormatVersion, panel_name_.c_str(),
-                     (unsigned) baud_rate_, (unsigned long) h.start_unix_s);
-    if (n > 0) t.write(reinterpret_cast<const uint8_t *>(banner), n);
-    t.close();
-  } else {
-    ESP_LOGW(TAG, "capture: failed to open sidecar %s",
-             current_path_txt_.c_str());
+  RamCapture txt;
+  txt.name = name_txt;
+  txt.is_text = true;
+  txt.mtime_ms = now_ms;
+  txt.bytes.reserve(static_cast<std::size_t>(banner_n) + 4096);
+  if (banner_n > 0) {
+    txt.bytes.insert(txt.bytes.end(),
+                     reinterpret_cast<const uint8_t *>(banner),
+                     reinterpret_cast<const uint8_t *>(banner) + banner_n);
   }
+  captures_.push_back(std::move(txt));
+  current_txt_idx_ = static_cast<int>(captures_.size()) - 1;
+  total_bytes_used_ += static_cast<std::size_t>(banner_n);
 
-  current_file_bytes_ = sizeof(hdr);
-  ESP_LOGI(TAG, "capture: opened %s", current_path_bin_.c_str());
+#ifdef USE_ARDUINO
+  ESP_LOGI(TAG, "capture: opened in-RAM file %s (+%s)",
+           captures_[current_bin_idx_].name.c_str(),
+           captures_[current_txt_idx_].name.c_str());
+#endif
 
-  // Track this filename so the HTTP listing can show it without having
-  // to iterate LittleFS (which fails on this device's root path).
-  // Store basename only — strip any leading slash + root_path_ prefix.
-  {
-    std::string basename = current_path_bin_;
-    auto slash = basename.find_last_of('/');
-    if (slash != std::string::npos) basename = basename.substr(slash + 1);
-    known_captures_.push_back(basename);
-    // Also remember the .txt sidecar so it shows up alongside.
-    std::string txt_base = current_path_txt_;
-    auto txt_slash = txt_base.find_last_of('/');
-    if (txt_slash != std::string::npos) txt_base = txt_base.substr(txt_slash + 1);
-    known_captures_.push_back(txt_base);
-  }
+  // Apply budget after opening — if the new pair pushes us over budget,
+  // older captures are evicted first (current pair is protected).
+  enforce_budget_();
+  budget_warn_emitted_ = false;
 }
 
-void Capture::close_current_file_() {
-  if (current_path_bin_.empty()) return;
-  ESP_LOGI(TAG, "capture: closed %s (%u bytes)", current_path_bin_.c_str(),
-           (unsigned) current_file_bytes_);
-  current_path_bin_.clear();
-  current_path_txt_.clear();
-  current_file_bytes_ = 0;
+void Capture::close_current_capture_() {
+  if (current_bin_idx_ < 0) return;
+#ifdef USE_ARDUINO
+  std::size_t bin_size = captures_[current_bin_idx_].bytes.size();
+  ESP_LOGI(TAG, "capture: closed %s (%u bytes total in RAM)",
+           captures_[current_bin_idx_].name.c_str(),
+           (unsigned) total_bytes_used_);
+  (void) bin_size;
+#endif
+  current_bin_idx_ = -1;
+  current_txt_idx_ = -1;
 }
 
 void Capture::write_bytes_(const uint8_t *bytes, std::size_t len) {
   if (test_sink_) {
     test_sink_(bytes, len);
+    bytes_written_total_ += len;
     return;
   }
-  if (!fs_ready_ || current_path_bin_.empty()) {
-    // No file open — drop. record() shouldn't get here in BridgeOnly
+  if (current_bin_idx_ < 0) {
+    // No live capture — drop. record() shouldn't get here in BridgeOnly
     // mode, but guard anyway.
     ++drops_;
     return;
   }
-  // Rotate before writing so the new event lands in a fresh file.
-  if (current_file_bytes_ + len > max_file_bytes_) {
-    open_new_file_();
-  }
-  File f = LittleFS.open(current_path_bin_.c_str(), "a");
-  if (!f) {
-    ++drops_;
-    return;
-  }
-  std::size_t written = f.write(bytes, len);
-  f.close();
-  if (written != len) {
-    ++drops_;
-    return;
-  }
-  // Append the same bytes to the hex sidecar.
-  write_hexdump_(current_file_bytes_, bytes, len);
-  current_file_bytes_ += len;
+  // The hex sidecar uses the .bin's pre-write offset so the displayed
+  // address column matches the .bin's byte stream. Capture that BEFORE
+  // appending to the .bin.
+  uint64_t bin_offset = captures_[current_bin_idx_].bytes.size();
+  append_to_(current_bin_idx_, bytes, len);
   bytes_written_total_ += len;
+  write_hexdump_(bin_offset, bytes, len);
+  enforce_budget_();
 }
 
 void Capture::write_hexdump_(uint64_t file_offset, const uint8_t *bytes,
                              std::size_t len) {
-  File t = LittleFS.open(current_path_txt_.c_str(), "a");
-  if (!t) return;
+  if (current_txt_idx_ < 0) return;
   // 16 bytes per line, "00000010  00 11 22 ...  |ASCII|"
   char line[96];
   for (std::size_t i = 0; i < len; i += 16) {
@@ -451,21 +424,45 @@ void Capture::write_hexdump_(uint64_t file_offset, const uint8_t *bytes,
       line[pos++] = '|';
       line[pos++] = '\n';
     }
-    t.write(reinterpret_cast<const uint8_t *>(line), pos);
+    append_to_(current_txt_idx_, reinterpret_cast<const uint8_t *>(line),
+               static_cast<std::size_t>(pos));
   }
-  t.close();
+}
+
+#ifdef USE_ARDUINO
+
+void Capture::setup() {
+  ESP_LOGI(TAG, "Capture ready: in-RAM (max=%u bytes, mode=%s)",
+           (unsigned) max_total_bytes_, mode_str());
+}
+
+void Capture::on_session_start() {
+  session_active_ = true;
+  session_start_us_ = (uint64_t) micros();
+  if (mode_ == Mode::None) return;
+  if (mode_ == Mode::MonitorOnly) return;  // capture only Monitor traffic
+  open_new_capture_();
+}
+
+void Capture::on_session_end() {
+  // Flush queued events before marking the capture closed.
+  flush_ring_();
+  close_current_capture_();
+  session_active_ = false;
 }
 
 #else  // !USE_ARDUINO — host test build
 
-void Capture::setup() { fs_ready_ = true; }
+void Capture::setup() {}
 
 void Capture::on_session_start() {
   session_active_ = true;
   session_start_us_ = 0;
   if (mode_ == Mode::None || mode_ == Mode::MonitorOnly) return;
-  // In host tests, "opening a file" means writing the header to the
-  // test sink so callers can assert on the byte stream.
+  // In host tests with a sink set, "opening a file" means writing the
+  // header to the sink so callers can assert on the byte stream.
+  // Otherwise (no sink) we still populate the in-RAM store so the host
+  // tests can exercise list_captures()/get_capture_bytes().
   if (test_sink_) {
     CaptureHeader h;
     h.version = kCaptureFormatVersion;
@@ -475,27 +472,19 @@ void Capture::on_session_start() {
     uint8_t hdr[kCaptureHeaderSize];
     serialize_header(h, hdr);
     test_sink_(hdr, sizeof(hdr));
-    current_file_bytes_ = sizeof(hdr);
+    bytes_written_total_ += sizeof(hdr);
+  } else {
+    open_new_capture_();
   }
 }
 
 void Capture::on_session_end() {
   flush_ring_();
-  session_active_ = false;
-  current_file_bytes_ = 0;
-}
-
-void Capture::write_bytes_(const uint8_t *bytes, std::size_t len) {
-  if (test_sink_) {
-    test_sink_(bytes, len);
-    current_file_bytes_ += len;
-    bytes_written_total_ += len;
+  if (!test_sink_) {
+    close_current_capture_();
   }
+  session_active_ = false;
 }
-
-void Capture::open_new_file_() {}
-void Capture::close_current_file_() {}
-void Capture::write_hexdump_(uint64_t, const uint8_t *, std::size_t) {}
 
 #endif  // USE_ARDUINO
 

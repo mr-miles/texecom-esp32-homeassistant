@@ -49,8 +49,7 @@ class Texecom : public Component {
   // Capture configuration (Plan 02-01). All YAML-driven; safe to call
   // multiple times before setup().
   void set_capture_mode(Capture::Mode m) { capture_.set_mode(m); }
-  void set_capture_max_file_bytes(uint32_t n) { capture_.set_max_file_bytes(n); }
-  void set_capture_root(const std::string &p) { capture_.set_root_path(p); }
+  void set_capture_max_ram_bytes(uint32_t n) { capture_.set_max_total_bytes(n); }
 
   // ESPHome Component lifecycle.
   void setup() override;
@@ -113,7 +112,8 @@ class Texecom : public Component {
   uint32_t uart_to_tcp_drops_{0};
   uint32_t tcp_to_uart_paused_ticks_{0};
 
-  // Capture sink (Plan 02-01). Owns its own LittleFS file handles.
+  // Capture sink (Plan 02-01). In-RAM storage with a configurable byte
+  // budget; oldest-first eviction. See capture.h for the full design.
   Capture capture_{};
 };
 
